@@ -360,8 +360,9 @@
 
     <script>
       const CONFIGURED_BACKEND_URL = "__STORYBIN_BACKEND_URL__";
-      const BACKEND_URL =
-        CONFIGURED_BACKEND_URL === "__STORYBIN_BACKEND_URL__" ? "http://localhost:8000" : CONFIGURED_BACKEND_URL;
+      const BACKEND_URL = CONFIGURED_BACKEND_URL.startsWith("http")
+        ? CONFIGURED_BACKEND_URL
+        : "http://localhost:8000";
 
       const searchInput = document.getElementById("searchInput");
       const searchButton = document.getElementById("searchButton");
