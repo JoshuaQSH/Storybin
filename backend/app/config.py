@@ -25,6 +25,7 @@ REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "20.0"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "dev")
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
 ALLOWED_ORIGINS = _split_csv(ALLOWED_ORIGIN) if ALLOWED_ORIGIN != "*" else ("*",)
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip() or None
 DB_PATH = os.getenv("DB_PATH", "data/banxia_cache.sqlite3")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 

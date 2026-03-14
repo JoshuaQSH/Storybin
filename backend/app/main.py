@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AppState:
-    store: IndexStore = field(default_factory=lambda: IndexStore(config.DB_PATH))
+    store: IndexStore = field(default_factory=lambda: IndexStore(config.DB_PATH, database_url=config.DATABASE_URL))
     crawler_module: Any = crawler
     admin_token: str = config.ADMIN_TOKEN
     auto_start_index_build: bool = True
@@ -298,6 +298,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
             "cache_pruned_total": state.cache_pruned_total,
             "cache_oldest_indexed_at": cache_stats["oldest_indexed_at"],
             "cache_newest_indexed_at": cache_stats["newest_indexed_at"],
+            "storage_backend": state.store.storage_backend,
         }
 
     @app.get("/featured")

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>半夏小说下载器</title>
+    <title>Storybin</title>
     <style>
       :root {
         --bg: #f4ede1;
@@ -316,8 +316,8 @@
   <body>
     <main>
       <section class="hero">
-        <div class="eyebrow">Banxia Downloader</div>
-        <h1>半夏小说下载器</h1>
+        <div class="eyebrow">Storybin</div>
+        <h1>Storybin</h1>
         <p class="subtitle">
           搜索已建立索引的小说，点击即可从本地后端生成并下载简体中文 `.txt`。
           超长小说在 Render 免费层上可能因为 30 秒超时而中断，所以本地测试时优先验证中短篇。
@@ -359,7 +359,9 @@
     </main>
 
     <script>
-      const BACKEND_URL = "http://localhost:8000";
+      const CONFIGURED_BACKEND_URL = "__STORYBIN_BACKEND_URL__";
+      const BACKEND_URL =
+        CONFIGURED_BACKEND_URL === "__STORYBIN_BACKEND_URL__" ? "http://localhost:8000" : CONFIGURED_BACKEND_URL;
 
       const searchInput = document.getElementById("searchInput");
       const searchButton = document.getElementById("searchButton");

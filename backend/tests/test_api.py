@@ -252,6 +252,7 @@ async def test_status_reports_cache_limits():
         assert payload["cache_pruned_total"] == 0
         assert payload["cache_oldest_indexed_at"] is not None
         assert payload["cache_newest_indexed_at"] is not None
+        assert payload["storage_backend"] == "sqlite"
 
 
 @pytest.mark.asyncio

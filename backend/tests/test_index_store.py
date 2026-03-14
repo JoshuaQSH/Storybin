@@ -1,5 +1,7 @@
+from sqlalchemy import text
+
 from app.crawler import NovelDetail, NovelMeta
-from app.index_store import IndexStore
+from app.index_store import IndexStore, resolve_database_url
 
 
 def make_novel(novel_id: str, title: str, author: str = "作者甲", category: str = "分類") -> NovelMeta:
@@ -103,11 +105,11 @@ def test_prune_oldest_novels_prefers_unaccessed_rows():
             make_novel("003", "臺灣甜心"),
         ]
     )
-    store.conn.execute("UPDATE novels SET indexed_at = '2026-03-10 00:00:00' WHERE novel_id = '001'")
-    store.conn.execute("UPDATE novels SET indexed_at = '2026-03-11 00:00:00' WHERE novel_id = '002'")
-    store.conn.execute("UPDATE novels SET indexed_at = '2026-03-12 00:00:00' WHERE novel_id = '003'")
-    store.conn.execute("UPDATE novels SET last_accessed_at = '2026-03-14 09:00:00' WHERE novel_id = '001'")
-    store.conn.commit()
+    with store.engine.begin() as conn:
+        conn.execute(text("UPDATE novels SET indexed_at = '2026-03-10 00:00:00' WHERE novel_id = '001'"))
+        conn.execute(text("UPDATE novels SET indexed_at = '2026-03-11 00:00:00' WHERE novel_id = '002'"))
+        conn.execute(text("UPDATE novels SET indexed_at = '2026-03-12 00:00:00' WHERE novel_id = '003'"))
+        conn.execute(text("UPDATE novels SET last_accessed_at = '2026-03-14 09:00:00' WHERE novel_id = '001'"))
 
     deleted = store.prune_oldest_novels(max_novels=2, prune_to_novels=2)
 
@@ -115,3 +117,11 @@ def test_prune_oldest_novels_prefers_unaccessed_rows():
     assert store.get_novel_by_id("001") is not None
     assert store.get_novel_by_id("002") is None
     assert store.get_novel_by_id("003") is not None
+
+
+def test_resolve_database_url_uses_sqlite_memory_by_default():
+    assert resolve_database_url() == "sqlite+pysqlite:///:memory:"
+
+
+def test_resolve_database_url_normalizes_postgres_scheme():
+    assert resolve_database_url(database_url="postgres://user:pass@host/db") == "postgresql+psycopg://user:pass@host/db"

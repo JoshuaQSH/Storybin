@@ -1,0 +1,67 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build frontend artifact
+        env:
+          PAGES_BACKEND_URL: ${{ vars.PAGES_BACKEND_URL }}
+        run: |
+          test -n "$PAGES_BACKEND_URL" || {
+            echo "Repository variable PAGES_BACKEND_URL is required.";
+            exit 1;
+          }
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          backend_url = os.environ["PAGES_BACKEND_URL"].rstrip("/")
+          source = Path("frontend/index.html").read_text(encoding="utf-8")
+          built = source.replace("__STORYBIN_BACKEND_URL__", backend_url)
+
+          dist = Path("dist")
+          dist.mkdir(exist_ok=True)
+          (dist / "index.html").write_text(built, encoding="utf-8")
+          (dist / "404.html").write_text(built, encoding="utf-8")
+          (dist / ".nojekyll").write_text("", encoding="utf-8")
+          PY
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

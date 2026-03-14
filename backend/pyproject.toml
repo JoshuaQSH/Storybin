@@ -10,8 +10,10 @@ dependencies = [
     "fastapi>=0.110.0",
     "lxml>=5.1.0",
     "opencc-python-reimplemented>=0.1.7",
+    "psycopg[binary]>=3.2.0",
     "rapidfuzz>=3.6.0",
     "requests>=2.31.0",
+    "sqlalchemy>=2.0.0",
     "uvicorn[standard]>=0.29.0",
 ]
 
