@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>半夏小说下载器</title>
+    <style>
+      :root {
+        --bg: #f4ede1;
+        --panel: rgba(255, 251, 245, 0.92);
+        --panel-strong: #fffaf2;
+        --ink: #2e241b;
+        --muted: #715c46;
+        --line: rgba(82, 55, 24, 0.15);
+        --accent: #9f4a1c;
+        --accent-strong: #7d3410;
+        --accent-soft: #f0d8be;
+        --good: #2d6b4d;
+        --warn: #9f5b13;
+        --shadow: 0 24px 60px rgba(68, 42, 16, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        font-family: "Palatino Linotype", "Book Antiqua", "Noto Serif SC", serif;
+        background:
+          radial-gradient(circle at top left, rgba(212, 170, 131, 0.35), transparent 30%),
+          radial-gradient(circle at bottom right, rgba(160, 98, 49, 0.18), transparent 28%),
+          linear-gradient(160deg, #f9f4eb 0%, #efe3d1 48%, #ead5be 100%);
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background-image:
+          linear-gradient(rgba(120, 83, 44, 0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(120, 83, 44, 0.03) 1px, transparent 1px);
+        background-size: 22px 22px;
+        opacity: 0.6;
+      }
+
+      main {
+        position: relative;
+        width: min(1080px, calc(100% - 32px));
+        margin: 40px auto 64px;
+      }
+
+      .hero {
+        padding: 28px;
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+        color: var(--muted);
+        font-size: 0.9rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        content: "";
+        width: 38px;
+        height: 1px;
+        background: linear-gradient(90deg, var(--accent), transparent);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2.4rem, 5vw, 4.2rem);
+        line-height: 0.95;
+      }
+
+      .subtitle {
+        margin: 16px 0 0;
+        max-width: 680px;
+        color: var(--muted);
+        font-size: 1.02rem;
+        line-height: 1.7;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 150px;
+        gap: 14px;
+        margin-top: 26px;
+      }
+
+      .search-input,
+      .search-button {
+        border: 1px solid rgba(126, 84, 33, 0.18);
+        border-radius: 18px;
+        font: inherit;
+      }
+
+      .search-input {
+        width: 100%;
+        padding: 18px 20px;
+        color: var(--ink);
+        background: rgba(255, 255, 255, 0.72);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+      }
+
+      .search-input:focus {
+        outline: 2px solid rgba(159, 74, 28, 0.2);
+        border-color: rgba(159, 74, 28, 0.5);
+      }
+
+      .search-button {
+        cursor: pointer;
+        color: #fff9f2;
+        background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+        box-shadow: 0 14px 28px rgba(125, 52, 16, 0.22);
+        transition: transform 140ms ease, box-shadow 140ms ease;
+      }
+
+      .search-button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 18px 30px rgba(125, 52, 16, 0.26);
+      }
+
+      .meta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 18px;
+      }
+
+      .status-chip,
+      .note-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.68);
+        font-size: 0.92rem;
+      }
+
+      .status-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--warn);
+      }
+
+      .status-dot.ready {
+        background: var(--good);
+      }
+
+      .status-dot.building {
+        animation: pulse 1.1s ease-in-out infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          transform: scale(1);
+          opacity: 0.75;
+        }
+
+        50% {
+          transform: scale(1.35);
+          opacity: 1;
+        }
+      }
+
+      .feedback {
+        min-height: 28px;
+        margin: 20px 4px 0;
+        color: var(--muted);
+      }
+
+      .feedback.error {
+        color: #9c1c1c;
+      }
+
+      .results {
+        display: grid;
+        gap: 16px;
+        margin-top: 22px;
+      }
+
+      .shelf {
+        margin-top: 26px;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: rgba(255, 250, 241, 0.8);
+        box-shadow: 0 14px 28px rgba(86, 58, 23, 0.06);
+      }
+
+      .section-title {
+        margin: 0;
+        font-size: 1.1rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .section-copy {
+        margin: 8px 0 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .card {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 18px;
+        padding: 20px 22px;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: var(--panel-strong);
+        box-shadow: 0 18px 38px rgba(86, 58, 23, 0.09);
+        opacity: 0;
+        transform: translateY(12px);
+        animation: reveal 220ms ease forwards;
+      }
+
+      @keyframes reveal {
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .card h2 {
+        margin: 0 0 10px;
+        font-size: 1.45rem;
+      }
+
+      .card p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .pill-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .pill {
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: #5f3518;
+        font-size: 0.9rem;
+      }
+
+      .download-link {
+        align-self: center;
+        padding: 13px 18px;
+        border-radius: 16px;
+        color: #fff9f2;
+        text-decoration: none;
+        white-space: nowrap;
+        background: linear-gradient(180deg, #365f4b, #244433);
+      }
+
+      .download-link:hover {
+        background: linear-gradient(180deg, #44755d, #294c3b);
+      }
+
+      .empty-state {
+        padding: 28px;
+        border: 1px dashed rgba(126, 84, 33, 0.32);
+        border-radius: 24px;
+        color: var(--muted);
+        text-align: center;
+        background: rgba(255, 250, 241, 0.72);
+      }
+
+      @media (max-width: 720px) {
+        main {
+          width: min(100% - 20px, 1080px);
+          margin-top: 20px;
+        }
+
+        .hero {
+          padding: 22px;
+          border-radius: 22px;
+        }
+
+        .controls,
+        .card {
+          grid-template-columns: 1fr;
+        }
+
+        .download-link {
+          justify-self: start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div class="eyebrow">Banxia Downloader</div>
+        <h1>半夏小说下载器</h1>
+        <p class="subtitle">
+          搜索已建立索引的小说，点击即可从本地后端生成并下载简体中文 `.txt`。
+          超长小说在 Render 免费层上可能因为 30 秒超时而中断，所以本地测试时优先验证中短篇。
+        </p>
+
+        <div class="controls">
+          <input
+            id="searchInput"
+            class="search-input"
+            type="search"
+            placeholder="输入书名，例如：台湾恋曲"
+            autocomplete="off"
+          />
+          <button id="searchButton" class="search-button" type="button">搜索</button>
+        </div>
+
+        <div class="meta-row">
+          <div class="status-chip">
+            <span id="statusDot" class="status-dot"></span>
+            <span id="statusText">索引状态：读取中…</span>
+          </div>
+          <div class="note-chip">后端：<span id="backendLabel"></span></div>
+        </div>
+
+        <div id="feedback" class="feedback"></div>
+      </section>
+
+      <section class="shelf">
+        <h2 class="section-title">首页主推</h2>
+        <p class="section-copy">按已抓取到的最近更新日期排序，展示当前最靠前的 10 本小说。</p>
+        <section id="featuredResults" class="results" aria-live="polite"></section>
+      </section>
+
+      <section class="shelf">
+        <h2 class="section-title">搜索结果</h2>
+        <p class="section-copy">支持关键词、联想式字符匹配和模糊匹配。</p>
+        <section id="results" class="results" aria-live="polite"></section>
+      </section>
+    </main>
+
+    <script>
+      const BACKEND_URL = "http://localhost:8000";
+
+      const searchInput = document.getElementById("searchInput");
+      const searchButton = document.getElementById("searchButton");
+      const statusDot = document.getElementById("statusDot");
+      const statusText = document.getElementById("statusText");
+      const feedback = document.getElementById("feedback");
+      const results = document.getElementById("results");
+      const featuredResults = document.getElementById("featuredResults");
+      const backendLabel = document.getElementById("backendLabel");
+
+      let debounceId = null;
+      let statusPollId = null;
+
+      backendLabel.textContent = BACKEND_URL;
+
+      function setFeedback(message, kind = "") {
+        feedback.textContent = message;
+        feedback.className = kind ? `feedback ${kind}` : "feedback";
+      }
+
+      function setStatus(status, count, lastError, pagesCrawled = null, pagesTotal = null) {
+        statusDot.className = "status-dot";
+        if (status === "ready") {
+          statusDot.classList.add("ready");
+        }
+        if (status === "building") {
+          statusDot.classList.add("building");
+        }
+
+        const labels = {
+          idle: "待命",
+          building: "建立中",
+          ready: "已就绪",
+          blocked: "源站阻止访问",
+          error: "出错",
+        };
+
+        const progress =
+          pagesTotal && Number.isFinite(pagesTotal)
+            ? `，已抓取 ${pagesCrawled || 0}/${pagesTotal} 页`
+            : pagesCrawled
+              ? `，已抓取 ${pagesCrawled} 页`
+              : "";
+        statusText.textContent = `索引状态：${labels[status] || status}，已索引 ${count} 本${progress}`;
+        if (lastError) {
+          setFeedback(`索引任务报告错误：${lastError}`, "error");
+        }
+
+        if (status === "building" && !statusPollId) {
+          statusPollId = window.setInterval(refreshStatus, 5000);
+        } else if (status !== "building" && statusPollId) {
+          window.clearInterval(statusPollId);
+          statusPollId = null;
+        }
+      }
+
+      function renderResults(items) {
+        if (!items.length) {
+          results.innerHTML = '<div class="empty-state">还没有可展示的结果。试试别的关键词，或等待索引建立完成。</div>';
+          return;
+        }
+
+        results.innerHTML = items
+          .map(
+            (item, index) => `
+              <article class="card" style="animation-delay:${index * 45}ms">
+                <div>
+                  <h2>${escapeHtml(item.title)}</h2>
+                  <p>${item.title_tc ? `原始标题：${escapeHtml(item.title_tc)}` : "原始标题：无"}</p>
+                  <div class="pill-row">
+                    <span class="pill">作者：${escapeHtml(item.author || "未知")}</span>
+                    <span class="pill">分类：${escapeHtml(item.category || "未知")}</span>
+                    <span class="pill">匹配分：${Math.round(item.score)}</span>
+                    <span class="pill">命中方式：${escapeHtml(item.match_type || "fuzzy")}</span>
+                  </div>
+                </div>
+                <a
+                  class="download-link"
+                  href="${BACKEND_URL}/download?novel_id=${encodeURIComponent(item.novel_id)}"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  下载 .txt
+                </a>
+              </article>
+            `
+          )
+          .join("");
+      }
+
+      function renderFeatured(items) {
+        if (!items.length) {
+          featuredResults.innerHTML =
+            '<div class="empty-state">最新主推列表还在准备中。随着索引推进，这里会自动出现最近更新的小说。</div>';
+          return;
+        }
+
+        featuredResults.innerHTML = items
+          .map(
+            (item, index) => `
+              <article class="card" style="animation-delay:${index * 35}ms">
+                <div>
+                  <h2>${escapeHtml(item.title)}</h2>
+                  <p>${item.title_tc ? `原始标题：${escapeHtml(item.title_tc)}` : "原始标题：无"}</p>
+                  <div class="pill-row">
+                    <span class="pill">作者：${escapeHtml(item.author || "未知")}</span>
+                    <span class="pill">分类：${escapeHtml(item.category || "未知")}</span>
+                    <span class="pill">最近更新：${escapeHtml(item.latest_update || "待补充")}</span>
+                  </div>
+                </div>
+                <a
+                  class="download-link"
+                  href="${BACKEND_URL}/download?novel_id=${encodeURIComponent(item.novel_id)}"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  下载 .txt
+                </a>
+              </article>
+            `
+          )
+          .join("");
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      async function refreshStatus() {
+        try {
+          const response = await fetch(`${BACKEND_URL}/status`);
+          if (!response.ok) {
+            throw new Error(`状态请求失败：HTTP ${response.status}`);
+          }
+          const data = await response.json();
+          setStatus(
+            data.index_status,
+            data.indexed_count,
+            data.last_error,
+            data.pages_crawled,
+            data.pages_total
+          );
+          if (data.source_site_blocked) {
+            setFeedback(
+              "源站当前使用 Cloudflare 阻止自动抓取。已保留本地缓存索引，但新的自动索引暂时不可用。",
+              "error"
+            );
+          }
+          await loadFeatured();
+        } catch (error) {
+          setFeedback(`无法连接后端状态接口：${error.message}`, "error");
+        }
+      }
+
+      async function loadFeatured() {
+        try {
+          const response = await fetch(`${BACKEND_URL}/featured?limit=10`);
+          if (!response.ok) {
+            throw new Error(`首页主推加载失败：HTTP ${response.status}`);
+          }
+          const payload = await response.json();
+          renderFeatured(payload.results || []);
+          setStatus(payload.index_status, payload.indexed_count, null);
+        } catch (error) {
+          featuredResults.innerHTML =
+            '<div class="empty-state">暂时无法加载首页主推。请确认后端正在运行并且索引任务已启动。</div>';
+        }
+      }
+
+      async function runSearch() {
+        const query = searchInput.value.trim();
+        if (!query) {
+          setFeedback("输入书名后开始搜索。");
+          results.innerHTML = "";
+          return;
+        }
+
+        searchButton.disabled = true;
+        setFeedback("正在查询…");
+
+        try {
+          const url = new URL(`${BACKEND_URL}/search`);
+          url.searchParams.set("q", query);
+          url.searchParams.set("limit", "12");
+
+          const response = await fetch(url);
+          if (!response.ok) {
+            throw new Error(`搜索失败：HTTP ${response.status}`);
+          }
+
+          const payload = await response.json();
+          setStatus(payload.index_status, payload.indexed_count, null);
+
+          if (!payload.results.length) {
+            renderResults([]);
+            setFeedback(
+              payload.index_status === "building"
+                ? "索引仍在建立中，结果会随着后台抓取逐步出现。"
+                : "没有匹配结果。试试更短的关键词。"
+            );
+            return;
+          }
+
+          renderResults(payload.results);
+          setFeedback(`找到 ${payload.results.length} 条结果。`);
+        } catch (error) {
+          setFeedback(`后端不可用或请求失败：${error.message}`, "error");
+          results.innerHTML =
+            '<div class="empty-state">当前无法连接后端。请确认 `uvicorn` 正运行在 http://localhost:8000。</div>';
+        } finally {
+          searchButton.disabled = false;
+        }
+      }
+
+      function queueSearch() {
+        window.clearTimeout(debounceId);
+        debounceId = window.setTimeout(runSearch, 300);
+      }
+
+      searchInput.addEventListener("input", queueSearch);
+      searchInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          window.clearTimeout(debounceId);
+          runSearch();
+        }
+      });
+      searchButton.addEventListener("click", () => {
+        window.clearTimeout(debounceId);
+        runSearch();
+      });
+
+      results.innerHTML = '<div class="empty-state">先查询一个书名，结果会显示在这里。</div>';
+      featuredResults.innerHTML =
+        '<div class="empty-state">正在读取首页主推小说，稍后会显示最近更新的前 10 本。</div>';
+      setFeedback("正在连接本地后端…");
+      refreshStatus();
+    </script>
+  </body>
+</html>

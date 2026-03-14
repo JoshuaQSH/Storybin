@@ -1,0 +1,292 @@
+import asyncio
+from contextlib import asynccontextmanager
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from app.crawler import BooklistPage, ChapterContent, NovelDetail, NovelMeta, SourceSiteBlockedError
+from app.index_store import IndexStore
+from app.main import AppState, create_app
+
+
+class DummyCrawler:
+    def __init__(self):
+        self.booklist_calls = []
+
+    def fetch_booklist_page(self, page: int, *, session=None, category_id=None):
+        return self.fetch_booklist_page_result(page, session=session, category_id=category_id).novels
+
+    def fetch_booklist_page_result(self, page: int, *, session=None, category_id=None):
+        self.booklist_calls.append((page, category_id))
+        if page > 2:
+            return BooklistPage(novels=[], total_pages=2)
+        if page == 1:
+            return BooklistPage(
+                novels=[
+                    NovelMeta(
+                        novel_id="409088",
+                        title="臺灣戀曲",
+                        author="作者甲",
+                        category="臺灣言情",
+                        url="https://www.xbanxia.cc/books/409088.html",
+                    ),
+                    NovelMeta(
+                        novel_id="409089",
+                        title="臺灣娛樂",
+                        author="作者乙",
+                        category="現代情感",
+                        url="https://www.xbanxia.cc/books/409089.html",
+                    ),
+                ],
+                total_pages=2,
+            )
+        return BooklistPage(
+            novels=[
+                NovelMeta(
+                    novel_id="409090",
+                    title="我們臺灣這些",
+                    author="作者丙",
+                    category="其他言情",
+                    url="https://www.xbanxia.cc/books/409090.html",
+                )
+            ],
+            total_pages=2,
+        )
+
+    def fetch_novel_detail(self, novel_url: str, *, session=None):
+        if novel_url.endswith("409089.html"):
+            return NovelDetail(
+                novel_id="409089",
+                title="臺灣娛樂",
+                author="作者乙",
+                category="現代情感",
+                chapter_urls=["https://www.xbanxia.cc/books/409089/1.html"],
+                latest_update="2026-03-14",
+            )
+        if novel_url.endswith("409090.html"):
+            return NovelDetail(
+                novel_id="409090",
+                title="我們臺灣這些",
+                author="作者丙",
+                category="其他言情",
+                chapter_urls=["https://www.xbanxia.cc/books/409090/1.html"],
+                latest_update="2026-03-12",
+            )
+        return NovelDetail(
+            novel_id="409088",
+            title="臺灣戀曲",
+            author="作者甲",
+            category="臺灣言情",
+            chapter_urls=[
+                "https://www.xbanxia.cc/books/409088/1.html",
+                "https://www.xbanxia.cc/books/409088/2.html",
+            ],
+            latest_update="2026-03-13",
+        )
+
+    def fetch_chapter(self, chapter_url: str, *, session=None):
+        title = "第一節" if chapter_url.endswith("/1.html") else "第二節"
+        body = "歡迎來到臺灣。"
+        return ChapterContent(title=title, body=body)
+
+
+class BlockedCrawler(DummyCrawler):
+    def fetch_booklist_page(self, page: int, *, session=None, category_id=None):
+        raise SourceSiteBlockedError("Source site blocked automated access for https://www.xbanxia.cc/list/1_1.html")
+
+    def fetch_booklist_page_result(self, page: int, *, session=None, category_id=None):
+        raise SourceSiteBlockedError("Source site blocked automated access for https://www.xbanxia.cc/list/1_1.html")
+
+
+@asynccontextmanager
+async def client_for_state(state: AppState):
+    app = create_app(state)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+
+
+def preload_store(store: IndexStore):
+    store.upsert_novels(
+        [
+            NovelMeta(
+                novel_id="409088",
+                title="臺灣戀曲",
+                author="作者甲",
+                category="臺灣言情",
+                url="https://www.xbanxia.cc/books/409088.html",
+            ),
+            NovelMeta(
+                novel_id="409089",
+                title="臺灣娛樂",
+                author="作者乙",
+                category="現代情感",
+                url="https://www.xbanxia.cc/books/409089.html",
+            ),
+        ]
+    )
+    crawler = DummyCrawler()
+    store.update_novel_detail(crawler.fetch_novel_detail("https://www.xbanxia.cc/books/409088.html"))
+    store.update_novel_detail(crawler.fetch_novel_detail("https://www.xbanxia.cc/books/409089.html"))
+
+
+@pytest.mark.asyncio
+async def test_health_check():
+    state = AppState(store=IndexStore(":memory:"), crawler_module=DummyCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_search_returns_keyword_and_associative_results():
+    store = IndexStore(":memory:")
+    preload_store(store)
+    state = AppState(store=store, crawler_module=DummyCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/search", params={"q": "台湾"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert [item["novel_id"] for item in payload["results"][:2]] == ["409089", "409088"]
+        assert payload["results"][0]["match_type"] == "keyword"
+        assert payload["index_status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_featured_returns_recent_novels():
+    store = IndexStore(":memory:")
+    preload_store(store)
+    state = AppState(store=store, crawler_module=DummyCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/featured")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["results"][0]["novel_id"] == "409089"
+        assert payload["results"][0]["latest_update"] == "2026-03-14"
+
+
+@pytest.mark.asyncio
+async def test_download_novel():
+    store = IndexStore(":memory:")
+    preload_store(store)
+    state = AppState(store=store, crawler_module=DummyCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/download", params={"novel_id": "409088"})
+        assert resp.status_code == 200
+        assert "《台湾恋曲》" in resp.text
+        assert "欢迎来到台湾。" in resp.text
+        assert "filename*=UTF-8''%E5%8F%B0%E6%B9%BE%E6%81%8B%E6%9B%B2.txt" in resp.headers["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_download_unknown_novel_returns_404():
+    state = AppState(store=IndexStore(":memory:"), crawler_module=DummyCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/download", params={"novel_id": "missing"})
+        assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_download_missing_novel_id_returns_422():
+    state = AppState(store=IndexStore(":memory:"), crawler_module=DummyCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/download")
+        assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_admin_refresh_requires_token():
+    state = AppState(store=IndexStore(":memory:"), crawler_module=DummyCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        resp = await client.post("/admin/refresh")
+        assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_status_reports_full_index_progress():
+    state = AppState(
+        store=IndexStore(":memory:"),
+        crawler_module=DummyCrawler(),
+        auto_start_index_build=True,
+        index_max_pages=0,
+    )
+
+    async with client_for_state(state) as client:
+        for _ in range(20):
+            resp = await client.get("/status")
+            payload = resp.json()
+            if payload["index_complete"]:
+                break
+            await asyncio.sleep(0)
+        assert payload["index_complete"] is True
+        assert payload["indexed_count"] == 3
+        assert payload["pages_total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_status_reports_cache_limits():
+    store = IndexStore(":memory:")
+    preload_store(store)
+    state = AppState(
+        store=store,
+        crawler_module=DummyCrawler(),
+        auto_start_index_build=False,
+        cache_max_novels=20000,
+        cache_prune_to_novels=16000,
+    )
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/status")
+        payload = resp.json()
+        assert payload["cache_max_novels"] == 20000
+        assert payload["cache_prune_to_novels"] == 16000
+        assert payload["cache_pruned_total"] == 0
+        assert payload["cache_oldest_indexed_at"] is not None
+        assert payload["cache_newest_indexed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_search_returns_cached_results_when_source_is_blocked():
+    store = IndexStore(":memory:")
+    preload_store(store)
+    state = AppState(
+        store=store,
+        crawler_module=BlockedCrawler(),
+        auto_start_index_build=False,
+    )
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/search", params={"q": "台湾"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert [item["novel_id"] for item in payload["results"][:2]] == ["409089", "409088"]
+        assert payload["indexed_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_status_reports_source_site_block_cleanly():
+    state = AppState(
+        store=IndexStore(":memory:"),
+        crawler_module=BlockedCrawler(),
+        auto_start_index_build=True,
+    )
+
+    async with client_for_state(state) as client:
+        for _ in range(20):
+            resp = await client.get("/status")
+            payload = resp.json()
+            if payload["index_status"] == "blocked":
+                break
+            await asyncio.sleep(0)
+        assert payload["index_status"] == "blocked"
+        assert payload["source_site_blocked"] is True
+        assert "Source site blocked automated access" in payload["last_error"]

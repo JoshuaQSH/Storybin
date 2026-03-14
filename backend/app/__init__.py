@@ -1,0 +1,1 @@
+"""Banxia downloader application package."""
