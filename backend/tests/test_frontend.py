@@ -4,6 +4,9 @@ from pathlib import Path
 def test_frontend_includes_upload_conversion_ui():
     html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(encoding="utf-8")
 
+    assert "<title>半夏故事匣</title>" in html
+    assert "<h1>半夏故事匣</h1>" in html
+    assert '<div class="eyebrow">Storybin</div>' in html
     assert "Storybin 会自动去备用网址查找" in html
     assert "导入共享书架" not in html
     assert 'id="cacheFileInput"' not in html
