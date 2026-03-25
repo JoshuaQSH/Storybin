@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Sequence
@@ -12,6 +13,7 @@ import requests
 
 from app import config, crawler
 from app.rendering import render_novel
+from app.storage import NovelObjectStorage, build_r2_storage_from_config
 
 
 class SeedRemoteError(RuntimeError):
@@ -134,6 +136,38 @@ def import_cached_novel(
     return response.json()
 
 
+def import_external_cached_novel(
+    *,
+    backend_url: str,
+    admin_token: str,
+    payload: dict[str, Any],
+    session: requests.Session | None = None,
+    timeout: float = 180.0,
+) -> dict[str, Any]:
+    own_session = session is None
+    session = session or requests.Session()
+
+    try:
+        response = session.post(
+            f"{backend_url.rstrip('/')}/admin/import-cached-external",
+            headers={"X-Admin-Token": admin_token},
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise SeedRemoteError(f"Failed to import external novel {payload['novel_id']}: {exc}") from exc
+    finally:
+        if own_session:
+            session.close()
+
+    if response.status_code >= 400:
+        body = response.text.strip()
+        raise SeedRemoteError(
+            f"Failed to import external novel {payload['novel_id']}: HTTP {response.status_code} {body}"
+        )
+    return response.json()
+
+
 def seed_novel_urls(
     *,
     backend_url: str,
@@ -142,6 +176,8 @@ def seed_novel_urls(
     workers: int = 1,
     spool_dir: str | None = None,
     spool_only: bool = False,
+    upload_to_r2: bool = False,
+    object_storage: NovelObjectStorage | None = None,
     crawler_module: Any = crawler,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     if workers > 1:
@@ -152,8 +188,13 @@ def seed_novel_urls(
             workers=workers,
             spool_dir=spool_dir,
             spool_only=spool_only,
+            upload_to_r2=upload_to_r2,
+            object_storage=object_storage,
             crawler_module=crawler_module,
         )
+
+    if upload_to_r2 and object_storage is None:
+        object_storage = build_r2_storage_from_config()
 
     imported: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
@@ -173,6 +214,14 @@ def seed_novel_urls(
                         "title": payload["title"],
                         "chapter_count": payload["chapter_count"],
                     }
+                elif upload_to_r2:
+                    external_payload = build_external_cached_payload(payload, object_storage=object_storage)
+                    response = import_external_cached_novel(
+                        backend_url=backend_url,
+                        admin_token=admin_token,
+                        payload=external_payload,
+                        session=session,
+                    )
                 else:
                     response = import_cached_novel(
                         backend_url=backend_url,
@@ -195,8 +244,13 @@ def _seed_novel_urls_parallel(
     workers: int,
     spool_dir: str | None,
     spool_only: bool,
+    upload_to_r2: bool,
+    object_storage: NovelObjectStorage | None,
     crawler_module: Any,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    if upload_to_r2 and object_storage is None:
+        object_storage = build_r2_storage_from_config()
+
     imported_by_index: dict[int, dict[str, Any]] = {}
     failures_by_index: dict[int, dict[str, str]] = {}
 
@@ -210,6 +264,8 @@ def _seed_novel_urls_parallel(
                 admin_token=admin_token,
                 spool_dir=spool_dir,
                 spool_only=spool_only,
+                upload_to_r2=upload_to_r2,
+                object_storage=object_storage,
                 crawler_module=crawler_module,
             ): index
             for index, novel_url in enumerate(novel_urls)
@@ -234,6 +290,8 @@ def _seed_single_url(
     admin_token: str,
     spool_dir: str | None,
     spool_only: bool,
+    upload_to_r2: bool,
+    object_storage: NovelObjectStorage | None,
     crawler_module: Any,
 ) -> tuple[int, dict[str, Any] | None, dict[str, str] | None]:
     try:
@@ -249,6 +307,15 @@ def _seed_single_url(
                 "title": payload["title"],
                 "chapter_count": payload["chapter_count"],
             }
+        elif upload_to_r2:
+            if object_storage is None:
+                object_storage = build_r2_storage_from_config()
+            external_payload = build_external_cached_payload(payload, object_storage=object_storage)
+            response = import_external_cached_novel(
+                backend_url=backend_url,
+                admin_token=admin_token,
+                payload=external_payload,
+            )
         else:
             response = import_cached_novel(
                 backend_url=backend_url,
@@ -287,6 +354,35 @@ def save_payload(path: Path, payload: dict[str, Any]):
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def build_external_cached_payload(
+    payload: dict[str, Any],
+    *,
+    object_storage: NovelObjectStorage,
+) -> dict[str, Any]:
+    content_txt = payload["content_txt"]
+    content_sha256 = hashlib.sha256(content_txt.encode("utf-8")).hexdigest()
+    uploaded = object_storage.put_text(
+        cache_object_key(payload["novel_id"], content_sha256),
+        content_txt,
+    )
+    return {
+        "novel_id": payload["novel_id"],
+        "title": payload["title"],
+        "author": payload["author"],
+        "category": payload["category"],
+        "url": payload["url"],
+        "object_key": str(uploaded["object_key"]),
+        "content_bytes": int(uploaded["content_bytes"]),
+        "content_sha256": content_sha256,
+        "chapter_count": payload["chapter_count"],
+        "latest_update": payload.get("latest_update"),
+    }
+
+
+def cache_object_key(novel_id: str, content_sha256: str) -> str:
+    return f"{novel_id}/{content_sha256}.txt"
+
+
 def import_spooled_payloads(
     *,
     backend_url: str,
@@ -294,6 +390,8 @@ def import_spooled_payloads(
     spool_dir: str,
     workers: int = 1,
     limit: int | None = None,
+    upload_to_r2: bool = False,
+    object_storage: NovelObjectStorage | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     payload_paths = sorted(Path(spool_dir).expanduser().glob("*.json"))
     if limit is not None:
@@ -305,7 +403,12 @@ def import_spooled_payloads(
             admin_token=admin_token,
             payload_paths=payload_paths,
             workers=workers,
+            upload_to_r2=upload_to_r2,
+            object_storage=object_storage,
         )
+
+    if upload_to_r2 and object_storage is None:
+        object_storage = build_r2_storage_from_config()
 
     imported: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
@@ -313,12 +416,21 @@ def import_spooled_payloads(
         for path in payload_paths:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-                response = import_cached_novel(
-                    backend_url=backend_url,
-                    admin_token=admin_token,
-                    payload=payload,
-                    session=session,
-                )
+                if upload_to_r2:
+                    external_payload = build_external_cached_payload(payload, object_storage=object_storage)
+                    response = import_external_cached_novel(
+                        backend_url=backend_url,
+                        admin_token=admin_token,
+                        payload=external_payload,
+                        session=session,
+                    )
+                else:
+                    response = import_cached_novel(
+                        backend_url=backend_url,
+                        admin_token=admin_token,
+                        payload=payload,
+                        session=session,
+                    )
                 imported.append(response)
             except Exception as exc:
                 failures.append({"payload_path": str(path), "error": str(exc)})
@@ -331,7 +443,12 @@ def _import_spooled_payloads_parallel(
     admin_token: str,
     payload_paths: Sequence[Path],
     workers: int,
+    upload_to_r2: bool,
+    object_storage: NovelObjectStorage | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    if upload_to_r2 and object_storage is None:
+        object_storage = build_r2_storage_from_config()
+
     imported_by_index: dict[int, dict[str, Any]] = {}
     failures_by_index: dict[int, dict[str, str]] = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -342,6 +459,8 @@ def _import_spooled_payloads_parallel(
                 path,
                 backend_url=backend_url,
                 admin_token=admin_token,
+                upload_to_r2=upload_to_r2,
+                object_storage=object_storage,
             ): index
             for index, path in enumerate(payload_paths)
         }
@@ -362,14 +481,26 @@ def _import_single_payload_path(
     *,
     backend_url: str,
     admin_token: str,
+    upload_to_r2: bool,
+    object_storage: NovelObjectStorage | None,
 ) -> tuple[int, dict[str, Any] | None, dict[str, str] | None]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        response = import_cached_novel(
-            backend_url=backend_url,
-            admin_token=admin_token,
-            payload=payload,
-        )
+        if upload_to_r2:
+            if object_storage is None:
+                object_storage = build_r2_storage_from_config()
+            external_payload = build_external_cached_payload(payload, object_storage=object_storage)
+            response = import_external_cached_novel(
+                backend_url=backend_url,
+                admin_token=admin_token,
+                payload=external_payload,
+            )
+        else:
+            response = import_cached_novel(
+                backend_url=backend_url,
+                admin_token=admin_token,
+                payload=payload,
+            )
         return index, response, None
     except Exception as exc:
         return index, None, {"payload_path": str(path), "error": str(exc)}
@@ -394,6 +525,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--spool-dir", help="Optional local directory for cached JSON payloads.")
     parser.add_argument("--spool-only", action="store_true", help="Crawl and save payloads locally without importing.")
     parser.add_argument("--import-from-spool", help="Import previously saved JSON payloads from this directory.")
+    parser.add_argument(
+        "--upload-to-r2",
+        action="store_true",
+        help="Upload novel TXT to R2 from the local machine, then register metadata with Render.",
+    )
     return parser.parse_args(argv)
 
 
@@ -407,6 +543,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             spool_dir=args.import_from_spool,
             workers=max(1, args.workers),
             limit=args.limit,
+            upload_to_r2=args.upload_to_r2,
         )
         for result in imported:
             print(json.dumps(result, ensure_ascii=False))
@@ -444,6 +581,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         workers=max(1, args.workers),
         spool_dir=args.spool_dir,
         spool_only=args.spool_only,
+        upload_to_r2=args.upload_to_r2,
     )
 
     for result in imported:

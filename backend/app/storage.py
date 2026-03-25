@@ -79,10 +79,7 @@ class R2NovelStorage:
         return f"{self.key_prefix}/{normalized}"
 
 
-def build_object_storage_from_config() -> NovelObjectStorage | None:
-    if config.CACHE_STORAGE_BACKEND != "r2":
-        return None
-
+def build_r2_storage_from_config() -> R2NovelStorage:
     missing = [
         name
         for name, value in (
@@ -105,6 +102,12 @@ def build_object_storage_from_config() -> NovelObjectStorage | None:
         secret_access_key=config.R2_SECRET_ACCESS_KEY,
         key_prefix=config.R2_KEY_PREFIX,
     )
+
+
+def build_object_storage_from_config() -> NovelObjectStorage | None:
+    if config.CACHE_STORAGE_BACKEND != "r2":
+        return None
+    return build_r2_storage_from_config()
 
 
 def _iter_decoded_utf8_chunks(byte_chunks: Iterator[bytes], closable: object | None = None) -> Iterator[str]:

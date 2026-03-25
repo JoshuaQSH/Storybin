@@ -47,6 +47,19 @@ class ImportedCachedNovel(BaseModel):
     latest_update: str | None = None
 
 
+class ImportedExternalCachedNovel(BaseModel):
+    novel_id: str
+    title: str
+    author: str
+    category: str
+    url: str
+    object_key: str
+    content_bytes: int
+    content_sha256: str
+    chapter_count: int
+    latest_update: str | None = None
+
+
 @dataclass
 class AppState:
     store: IndexStore = field(default_factory=lambda: IndexStore(config.DB_PATH, database_url=config.DATABASE_URL))
@@ -603,6 +616,53 @@ def create_app(state: AppState | None = None) -> FastAPI:
             "title": cached["title_sc"],
             "chapter_count": cached["chapter_count"],
             "cache_storage_backend": cached["storage_backend"],
+        }
+
+    @app.post("/admin/import-cached-external")
+    async def import_external_cached_novel(
+        payload: ImportedExternalCachedNovel,
+        x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+        state: AppState = Depends(get_state),
+    ):
+        _require_admin_token(x_admin_token, state)
+        if state.cache_storage_backend != "r2" or state.object_storage is None:
+            raise HTTPException(
+                status_code=409,
+                detail="External cache imports require CACHE_STORAGE_BACKEND=r2 with configured object storage.",
+            )
+        state.store.upsert_novels(
+            [
+                NovelMeta(
+                    novel_id=payload.novel_id,
+                    title=payload.title,
+                    author=payload.author,
+                    category=payload.category,
+                    url=payload.url,
+                    latest_update=payload.latest_update,
+                )
+            ]
+        )
+        state.store.upsert_cached_novel(
+            novel_id=payload.novel_id,
+            title_sc=to_simplified(payload.title),
+            content_txt="",
+            storage_backend="r2",
+            object_key=payload.object_key,
+            content_bytes=payload.content_bytes,
+            content_sha256=payload.content_sha256,
+            chapter_count=payload.chapter_count,
+        )
+        state.refresh_search_documents()
+        cached = state.store.get_cached_novel(payload.novel_id)
+        if cached is None:  # pragma: no cover - defensive guard
+            raise HTTPException(status_code=500, detail="Imported external cache was not persisted.")
+        return {
+            "status": "imported",
+            "novel_id": payload.novel_id,
+            "title": cached["title_sc"],
+            "chapter_count": cached["chapter_count"],
+            "cache_storage_backend": cached["storage_backend"],
+            "object_key": cached["object_key"],
         }
 
     return app

@@ -70,6 +70,25 @@ uv run python -m app.seed_remote \
   --workers 4
 ```
 
+### Best workflow for Free Render
+
+If you stay on the Free Render web service, the safest workflow is:
+
+1. Crawl on your local machine.
+2. Upload finished `.txt` files to R2 from your local machine.
+3. Send only lightweight metadata to Render so it can index and serve downloads.
+
+That avoids making the Free Render web service upload the full novel bodies itself.
+
+```bash
+uv run python -m app.seed_remote \
+  --backend-url https://storybin.onrender.com \
+  --admin-token "$ADMIN_TOKEN" \
+  --all-pages \
+  --upload-to-r2 \
+  --workers 2
+```
+
 If you want a resumable local crawl, save each converted novel as a JSON payload first:
 
 ```bash
@@ -88,6 +107,7 @@ uv run python -m app.seed_remote \
   --backend-url https://storybin.onrender.com \
   --admin-token "$ADMIN_TOKEN" \
   --import-from-spool ./data/seed_spool \
+  --upload-to-r2 \
   --workers 2
 ```
 

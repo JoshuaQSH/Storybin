@@ -466,6 +466,50 @@ async def test_admin_import_cached_novel_makes_search_and_download_available():
 
 
 @pytest.mark.asyncio
+async def test_admin_import_cached_external_registers_existing_r2_object():
+    store = IndexStore(":memory:")
+    object_storage = MemoryObjectStorage()
+    object_key = "novels/600002/external.txt"
+    object_storage.objects[object_key] = "《台湾外部导入小说》\n作者：作者己\n\n欢迎来到台湾。\n"
+    state = AppState(
+        store=store,
+        crawler_module=BlockedCrawler(),
+        auto_start_index_build=False,
+        cache_storage_backend="r2",
+        object_storage=object_storage,
+    )
+
+    async with client_for_state(state) as client:
+        import_resp = await client.post(
+            "/admin/import-cached-external",
+            headers={"X-Admin-Token": "dev"},
+            json={
+                "novel_id": "600002",
+                "title": "臺灣外部導入小說",
+                "author": "作者己",
+                "category": "測試分類",
+                "url": "https://www.xbanxia.cc/books/600002.html",
+                "object_key": object_key,
+                "content_bytes": len(object_storage.objects[object_key].encode("utf-8")),
+                "content_sha256": "sha256-demo",
+                "chapter_count": 1,
+                "latest_update": "2026-03-25",
+            },
+        )
+        assert import_resp.status_code == 200
+        assert import_resp.json()["status"] == "imported"
+
+        search_resp = await client.get("/search", params={"q": "台湾外部导入小说"})
+        assert search_resp.status_code == 200
+        assert search_resp.json()["results"][0]["novel_id"] == "600002"
+
+        download_resp = await client.get("/download", params={"novel_id": "600002"})
+        assert download_resp.status_code == 200
+        assert download_resp.headers["x-storybin-download-cache"] == "hit"
+        assert "欢迎来到台湾。" in download_resp.text
+
+
+@pytest.mark.asyncio
 async def test_upload_convert_makes_simplified_txt_and_epub_available():
     state = AppState(store=IndexStore(":memory:"), crawler_module=BlockedCrawler(), auto_start_index_build=False)
 

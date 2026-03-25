@@ -3,10 +3,13 @@ import requests
 from app.crawler import BooklistPage, ChapterContent, NovelDetail, NovelMeta
 from app.seed_remote import (
     build_import_payload,
+    build_external_cached_payload,
     build_or_load_payload,
+    cache_object_key,
     discover_all_novel_urls,
     discover_novel_urls,
     import_cached_novel,
+    import_external_cached_novel,
     import_spooled_payloads,
     novel_url_from_id,
     payload_path_for_novel_url,
@@ -114,6 +117,15 @@ class FakeSession:
         return False
 
 
+class MemoryObjectStorage:
+    def __init__(self):
+        self.objects = {}
+
+    def put_text(self, key: str, text: str):
+        self.objects[key] = text
+        return {"object_key": key, "content_bytes": len(text.encode("utf-8"))}
+
+
 def test_novel_url_from_id():
     assert novel_url_from_id("410113").endswith("/books/410113.html")
 
@@ -187,6 +199,27 @@ def test_import_cached_novel_posts_expected_payload():
     assert session.calls[0]["headers"]["X-Admin-Token"] == "secret"
 
 
+def test_import_external_cached_novel_posts_expected_payload():
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {"status": "imported", "novel_id": "410113", "cache_storage_backend": "r2"},
+            )
+        ]
+    )
+
+    result = import_external_cached_novel(
+        backend_url="https://storybin.onrender.com",
+        admin_token="secret",
+        payload={"novel_id": "410113"},
+        session=session,
+    )
+
+    assert result["status"] == "imported"
+    assert session.calls[0]["url"] == "https://storybin.onrender.com/admin/import-cached-external"
+
+
 def test_import_cached_novel_raises_helpful_error():
     session = FakeSession([FakeResponse(502, {}, text='{"detail":"boom"}')])
 
@@ -249,6 +282,43 @@ def test_seed_novel_urls_supports_parallel_workers(monkeypatch):
     assert [item["novel_id"] for item in imported] == ["410113", "410182"]
 
 
+def test_build_external_cached_payload_uploads_to_object_storage():
+    object_storage = MemoryObjectStorage()
+    payload = build_import_payload(
+        "https://www.xbanxia.cc/books/410113.html",
+        crawler_module=DummyCrawler(),
+    )
+
+    external_payload = build_external_cached_payload(payload, object_storage=object_storage)
+
+    assert external_payload["object_key"] == cache_object_key("410113", external_payload["content_sha256"])
+    assert external_payload["content_bytes"] > 0
+    assert external_payload["object_key"] in object_storage.objects
+
+
+def test_seed_novel_urls_can_upload_to_r2_before_import(monkeypatch):
+    object_storage = MemoryObjectStorage()
+
+    def fake_import_external_cached_novel(*, backend_url: str, admin_token: str, payload: dict, session=None, timeout: float = 180.0):
+        del backend_url, admin_token, session, timeout
+        return {"status": "imported", "novel_id": payload["novel_id"], "cache_storage_backend": "r2"}
+
+    monkeypatch.setattr("app.seed_remote.import_external_cached_novel", fake_import_external_cached_novel)
+
+    imported, failures = seed_novel_urls(
+        backend_url="https://storybin.onrender.com",
+        admin_token="secret",
+        novel_urls=["https://www.xbanxia.cc/books/410113.html"],
+        upload_to_r2=True,
+        object_storage=object_storage,
+        crawler_module=DummyCrawler(),
+    )
+
+    assert failures == []
+    assert imported == [{"status": "imported", "novel_id": "410113", "cache_storage_backend": "r2"}]
+    assert object_storage.objects
+
+
 def test_seed_novel_urls_can_spool_without_import(tmp_path):
     imported, failures = seed_novel_urls(
         backend_url="https://storybin.onrender.com",
@@ -306,3 +376,29 @@ def test_import_spooled_payloads_uploads_saved_json(monkeypatch, tmp_path):
 
     assert failures == []
     assert imported == [{"status": "imported", "novel_id": "410113", "cache_storage_backend": "r2"}]
+
+
+def test_import_spooled_payloads_can_upload_to_r2_before_register(monkeypatch, tmp_path):
+    (tmp_path / "410113.json").write_text(
+        '{"novel_id":"410113","title":"二十年夏","author":"吟稀","category":"耽美同人","url":"https://www.xbanxia.cc/books/410113.html","content_txt":"cached","chapter_count":1,"latest_update":"2026-03-24"}',
+        encoding="utf-8",
+    )
+    object_storage = MemoryObjectStorage()
+
+    def fake_import_external_cached_novel(*, backend_url: str, admin_token: str, payload: dict, session=None, timeout: float = 180.0):
+        del backend_url, admin_token, session, timeout
+        return {"status": "imported", "novel_id": payload["novel_id"], "cache_storage_backend": "r2"}
+
+    monkeypatch.setattr("app.seed_remote.import_external_cached_novel", fake_import_external_cached_novel)
+
+    imported, failures = import_spooled_payloads(
+        backend_url="https://storybin.onrender.com",
+        admin_token="secret",
+        spool_dir=str(tmp_path),
+        upload_to_r2=True,
+        object_storage=object_storage,
+    )
+
+    assert failures == []
+    assert imported == [{"status": "imported", "novel_id": "410113", "cache_storage_backend": "r2"}]
+    assert object_storage.objects
