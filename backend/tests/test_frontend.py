@@ -19,3 +19,5 @@ def test_frontend_includes_upload_conversion_ui():
     assert "/convert/upload" in html
     assert "下载简体 .epub" in html
     assert "备用网址结果" in html
+    assert "Owner:</strong> S. Qiu" in html
+    assert "Minimal rights reserved" in html

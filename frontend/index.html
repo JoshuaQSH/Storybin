@@ -338,6 +338,20 @@
         background: rgba(255, 250, 241, 0.72);
       }
 
+      .site-footer {
+        margin-top: 28px;
+        padding: 18px 8px 0;
+        color: var(--muted);
+        text-align: center;
+        font-size: 0.95rem;
+        line-height: 1.7;
+      }
+
+      .site-footer strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
       @media (max-width: 720px) {
         main {
           width: min(100% - 20px, 1080px);
@@ -417,6 +431,11 @@
         <p class="section-copy">支持关键词、联想式字符匹配和模糊匹配；原站不可达时会补充备用网址结果。</p>
         <section id="results" class="results" aria-live="polite"></section>
       </section>
+
+      <footer class="site-footer">
+        <div><strong>Owner:</strong> S. Qiu</div>
+        <div>Minimal rights reserved</div>
+      </footer>
     </main>
 
     <script>
