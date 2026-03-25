@@ -204,6 +204,7 @@ def _request_response(
                 timeout=config.REQUEST_TIMEOUT_SECONDS,
                 data=data,
                 params=params,
+                proxies=config.CRAWLER_PROXIES or None,
             )
             response.raise_for_status()
             apparent_encoding = getattr(response, "apparent_encoding", None)
@@ -287,7 +288,11 @@ def _request_text_via_playwright(
 
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            launch_options = {"headless": True}
+            proxy_server = config.CRAWLER_HTTPS_PROXY or config.CRAWLER_HTTP_PROXY
+            if proxy_server:
+                launch_options["proxy"] = {"server": proxy_server}
+            browser = playwright.chromium.launch(**launch_options)
             context = browser.new_context(
                 user_agent=config.HEADERS["User-Agent"],
                 locale="zh-TW",
@@ -345,6 +350,7 @@ def _request_text_via_curl_cffi(
             headers=config.HEADERS,
             timeout=config.REQUEST_TIMEOUT_SECONDS,
             impersonate="chrome",
+            proxies=config.CRAWLER_PROXIES or None,
         )
     except curl_requests.RequestsError as exc:  # pragma: no cover - exercised in live probing only.
         raise CrawlerHTTPError(f"curl_cffi failed to fetch {url}: {exc}") from exc

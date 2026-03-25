@@ -118,6 +118,33 @@ def test_file_backed_store_persists_cached_novel(tmp_path):
         reopened.close()
 
 
+def test_file_backed_store_persists_uploaded_document(tmp_path):
+    db_path = tmp_path / "cache.sqlite3"
+
+    store = IndexStore(str(db_path))
+    store.upsert_uploaded_document(
+        upload_id="upload-001",
+        source_filename="taiwan-love.txt",
+        title_tc="臺灣戀曲",
+        title_sc="台湾恋曲",
+        author_tc="作者甲",
+        author_sc="作者甲",
+        content_txt="《台湾恋曲》\n作者：作者甲\n",
+        content_bytes=36,
+        content_sha256="abc123",
+    )
+    store.close()
+
+    reopened = IndexStore(str(db_path))
+    try:
+        record = reopened.get_uploaded_document("upload-001")
+        assert record is not None
+        assert record["title_sc"] == "台湾恋曲"
+        assert record["source_filename"] == "taiwan-love.txt"
+    finally:
+        reopened.close()
+
+
 def test_prune_oldest_novels_prefers_unaccessed_rows():
     store = IndexStore(":memory:")
     store.upsert_novels(

@@ -188,3 +188,40 @@ def test_fetch_booklist_page_preserves_source_blocked_error_with_curl_cffi_fallb
 
     with pytest.raises(SourceSiteBlockedError):
         fetch_booklist_page(1)
+
+
+def test_fetch_booklist_page_passes_proxy_config_to_requests(monkeypatch):
+    html = (FIXTURES / "booklist_page1.html").read_text(encoding="utf-8")
+    session = make_mock_session(html)
+    monkeypatch.setattr(crawler.config, "CRAWLER_PROXIES", {"https": "http://proxy.local:8080"})
+
+    fetch_booklist_page(1, session=session)
+
+    _, kwargs = session.request.call_args
+    assert kwargs["proxies"] == {"https": "http://proxy.local:8080"}
+
+
+def test_curl_cffi_fetch_uses_proxy_config(monkeypatch):
+    html = "<html><body>ok</body></html>"
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = html
+
+    class FakeCurlRequests:
+        class RequestsError(Exception):
+            pass
+
+        @staticmethod
+        def get(url: str, **kwargs):
+            del url
+            captured.update(kwargs)
+            return FakeResponse()
+
+    monkeypatch.setattr(crawler.config, "CRAWLER_PROXIES", {"https": "http://proxy.local:8080"})
+    monkeypatch.setitem(__import__("sys").modules, "curl_cffi.requests", FakeCurlRequests)
+    monkeypatch.setitem(__import__("sys").modules, "curl_cffi", type("FakeCurlModule", (), {"requests": FakeCurlRequests}))
+
+    assert crawler._request_text_via_curl_cffi("https://example.com", apply_rate_limit=False) == html
+    assert captured["proxies"] == {"https": "http://proxy.local:8080"}

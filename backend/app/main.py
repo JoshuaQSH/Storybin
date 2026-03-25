@@ -7,12 +7,14 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 import hashlib
 import logging
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+import uuid
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from app import config, crawler
@@ -24,10 +26,12 @@ from app.crawler import (
     NovelMeta,
     SourceSiteBlockedError,
 )
+from app.epub import build_epub
 from app.index_store import IndexStore
 from app.rendering import render_novel
 from app.search import SearchDocument, fuzzy_search
 from app.storage import ObjectStorageError, build_object_storage_from_config
+from app.uploads import UploadedTextDecodeError, convert_uploaded_txt
 
 logger = logging.getLogger(__name__)
 
@@ -246,14 +250,22 @@ def _require_admin_token(x_admin_token: str | None, state: AppState):
         raise HTTPException(status_code=401, detail="Invalid admin token.")
 
 
-def _download_headers(title: str) -> dict[str, str]:
-    encoded_name = quote(f"{title}.txt")
+def _attachment_headers(filename: str, *, fallback_name: str) -> dict[str, str]:
+    encoded_name = quote(filename)
     return {
         "Content-Disposition": (
-            'attachment; filename="banxia.txt"; '
+            f'attachment; filename="{fallback_name}"; '
             f"filename*=UTF-8''{encoded_name}"
         )
     }
+
+
+def _download_headers(title: str) -> dict[str, str]:
+    return _attachment_headers(f"{title}.txt", fallback_name="banxia.txt")
+
+
+def _epub_headers(title: str) -> dict[str, str]:
+    return _attachment_headers(f"{title}.epub", fallback_name="banxia.epub")
 
 
 def _stream_text(text: str) -> Any:
@@ -435,6 +447,83 @@ def create_app(state: AppState | None = None) -> FastAPI:
                 **_download_headers(cached["title_sc"]),
                 "X-Storybin-Download-Cache": "hit" if cache_hit else "miss",
             },
+        )
+
+    @app.post("/convert/upload")
+    async def upload_and_convert_txt(
+        request: Request,
+        file: UploadFile = File(...),
+        state: AppState = Depends(get_state),
+    ):
+        source_filename = file.filename or "uploaded.txt"
+        try:
+            converted = convert_uploaded_txt(source_filename, await file.read())
+        except UploadedTextDecodeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        upload_id = uuid.uuid4().hex
+        state.store.upsert_uploaded_document(
+            upload_id=upload_id,
+            source_filename=source_filename,
+            title_tc=converted.title_tc,
+            title_sc=converted.title_sc,
+            author_tc=converted.author_tc,
+            author_sc=converted.author_sc,
+            content_txt=converted.content_txt,
+            content_bytes=converted.content_bytes,
+            content_sha256=converted.content_sha256,
+        )
+        txt_url = str(request.url_for("download_uploaded_txt", upload_id=upload_id))
+        epub_url = str(request.url_for("download_uploaded_epub", upload_id=upload_id))
+        return {
+            "status": "converted",
+            "upload_id": upload_id,
+            "source_filename": source_filename,
+            "title": converted.title_sc,
+            "title_tc": converted.title_tc,
+            "author": converted.author_sc,
+            "author_tc": converted.author_tc,
+            "content_bytes": converted.content_bytes,
+            "txt_download_url": txt_url,
+            "epub_download_url": epub_url,
+        }
+
+    @app.get("/convert/uploaded/{upload_id}.txt", name="download_uploaded_txt")
+    async def download_uploaded_txt(
+        upload_id: str,
+        state: AppState = Depends(get_state),
+    ):
+        uploaded = state.store.get_uploaded_document(upload_id)
+        if uploaded is None:
+            raise HTTPException(status_code=404, detail="Uploaded document not found.")
+        state.store.touch_uploaded_document(upload_id)
+        return StreamingResponse(
+            _stream_text(uploaded["content_txt"]),
+            media_type="text/plain; charset=utf-8",
+            headers=_attachment_headers(
+                f"{uploaded['title_sc']}.txt",
+                fallback_name=f"{Path(uploaded['source_filename']).stem or 'converted'}.txt",
+            ),
+        )
+
+    @app.get("/convert/uploaded/{upload_id}.epub", name="download_uploaded_epub")
+    async def download_uploaded_epub(
+        upload_id: str,
+        state: AppState = Depends(get_state),
+    ):
+        uploaded = state.store.get_uploaded_document(upload_id)
+        if uploaded is None:
+            raise HTTPException(status_code=404, detail="Uploaded document not found.")
+        state.store.touch_uploaded_document(upload_id)
+        epub_bytes = build_epub(
+            uploaded["title_sc"],
+            uploaded["author_sc"] or "未知",
+            uploaded["content_txt"],
+        )
+        return Response(
+            content=epub_bytes,
+            media_type="application/epub+zip",
+            headers=_epub_headers(uploaded["title_sc"]),
         )
 
     @app.post("/admin/refresh")

@@ -102,13 +102,15 @@
       }
 
       .search-input,
+      .file-input,
       .search-button {
         border: 1px solid rgba(126, 84, 33, 0.18);
         border-radius: 18px;
         font: inherit;
       }
 
-      .search-input {
+      .search-input,
+      .file-input {
         width: 100%;
         padding: 18px 20px;
         color: var(--ink);
@@ -119,6 +121,10 @@
       .search-input:focus {
         outline: 2px solid rgba(159, 74, 28, 0.2);
         border-color: rgba(159, 74, 28, 0.5);
+      }
+
+      .file-input {
+        padding-block: 14px;
       }
 
       .search-button {
@@ -282,6 +288,21 @@
         background: linear-gradient(180deg, #44755d, #294c3b);
       }
 
+      .download-link.alt {
+        background: linear-gradient(180deg, #876c30, #684f1d);
+      }
+
+      .download-link.alt:hover {
+        background: linear-gradient(180deg, #9a7f3c, #76591f);
+      }
+
+      .action-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 18px;
+      }
+
       .empty-state {
         padding: 28px;
         border: 1px dashed rgba(126, 84, 33, 0.32);
@@ -346,6 +367,19 @@
       </section>
 
       <section class="shelf">
+        <h2 class="section-title">上传自带 TXT</h2>
+        <p class="section-copy">
+          如果你已经通过浏览器脚本从原站导出了繁体中文 `.txt`，可以直接上传到这里，转换成简体中文，并下载 `.txt` 或 `.epub`。
+        </p>
+        <div class="controls">
+          <input id="uploadInput" class="file-input" type="file" accept=".txt,text/plain" />
+          <button id="uploadButton" class="search-button" type="button">转换文件</button>
+        </div>
+        <div id="uploadFeedback" class="feedback"></div>
+        <section id="uploadResults" class="results" aria-live="polite"></section>
+      </section>
+
+      <section class="shelf">
         <h2 class="section-title">首页主推</h2>
         <p class="section-copy">按已抓取到的最近更新日期排序，展示当前最靠前的 10 本小说。</p>
         <section id="featuredResults" class="results" aria-live="polite"></section>
@@ -366,6 +400,10 @@
 
       const searchInput = document.getElementById("searchInput");
       const searchButton = document.getElementById("searchButton");
+      const uploadInput = document.getElementById("uploadInput");
+      const uploadButton = document.getElementById("uploadButton");
+      const uploadFeedback = document.getElementById("uploadFeedback");
+      const uploadResults = document.getElementById("uploadResults");
       const statusDot = document.getElementById("statusDot");
       const statusText = document.getElementById("statusText");
       const feedback = document.getElementById("feedback");
@@ -381,6 +419,11 @@
       function setFeedback(message, kind = "") {
         feedback.textContent = message;
         feedback.className = kind ? `feedback ${kind}` : "feedback";
+      }
+
+      function setUploadFeedback(message, kind = "") {
+        uploadFeedback.textContent = message;
+        uploadFeedback.className = kind ? `feedback ${kind}` : "feedback";
       }
 
       function setStatus(status, count, lastError, pagesCrawled = null, pagesTotal = null) {
@@ -487,6 +530,30 @@
           .join("");
       }
 
+      function renderUploadResult(payload) {
+        uploadResults.innerHTML = `
+          <article class="card">
+            <div>
+              <h2>${escapeHtml(payload.title)}</h2>
+              <p>${payload.title_tc ? `原始标题：${escapeHtml(payload.title_tc)}` : "原始标题：未识别"}</p>
+              <div class="pill-row">
+                <span class="pill">作者：${escapeHtml(payload.author || "未知")}</span>
+                <span class="pill">原文件：${escapeHtml(payload.source_filename || "未知")}</span>
+                <span class="pill">简体文本：${escapeHtml(payload.content_bytes || 0)} 字节</span>
+              </div>
+              <div class="action-row">
+                <a class="download-link" href="${escapeHtml(payload.txt_download_url)}" target="_blank" rel="noreferrer">
+                  下载简体 .txt
+                </a>
+                <a class="download-link alt" href="${escapeHtml(payload.epub_download_url)}" target="_blank" rel="noreferrer">
+                  下载简体 .epub
+                </a>
+              </div>
+            </div>
+          </article>
+        `;
+      }
+
       function escapeHtml(value) {
         return String(value)
           .replaceAll("&", "&amp;")
@@ -582,6 +649,47 @@
         }
       }
 
+      async function runUpload() {
+        const file = uploadInput.files && uploadInput.files[0];
+        if (!file) {
+          setUploadFeedback("先选择一个繁体中文 TXT 文件。", "error");
+          return;
+        }
+
+        uploadButton.disabled = true;
+        setUploadFeedback("正在转换文件…");
+
+        try {
+          const formData = new FormData();
+          formData.append("file", file);
+
+          const response = await fetch(`${BACKEND_URL}/convert/upload`, {
+            method: "POST",
+            body: formData,
+          });
+
+          let payload = {};
+          try {
+            payload = await response.json();
+          } catch (error) {
+            payload = {};
+          }
+
+          if (!response.ok) {
+            throw new Error(payload.detail || `上传失败：HTTP ${response.status}`);
+          }
+
+          renderUploadResult(payload);
+          setUploadFeedback("转换完成，可以直接下载简体 TXT 或 EPUB。");
+        } catch (error) {
+          setUploadFeedback(`上传或转换失败：${error.message}`, "error");
+          uploadResults.innerHTML =
+            '<div class="empty-state">当前无法完成文件转换。请确认后端已更新，并且上传的是可解码的 TXT 文件。</div>';
+        } finally {
+          uploadButton.disabled = false;
+        }
+      }
+
       function queueSearch() {
         window.clearTimeout(debounceId);
         debounceId = window.setTimeout(runSearch, 300);
@@ -599,8 +707,11 @@
         window.clearTimeout(debounceId);
         runSearch();
       });
+      uploadButton.addEventListener("click", runUpload);
 
       results.innerHTML = '<div class="empty-state">先查询一个书名，结果会显示在这里。</div>';
+      uploadResults.innerHTML =
+        '<div class="empty-state">上传你从原站导出的繁体 TXT，这里会生成可下载的简体 TXT 和 EPUB。</div>';
       featuredResults.innerHTML =
         '<div class="empty-state">正在读取首页主推小说，稍后会显示最近更新的前 10 本。</div>';
       setFeedback("正在连接本地后端…");

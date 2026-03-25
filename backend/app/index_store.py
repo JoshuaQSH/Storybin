@@ -95,6 +95,25 @@ class IndexStore:
                     """
                 )
             )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS uploaded_documents (
+                        upload_id          TEXT PRIMARY KEY,
+                        source_filename    TEXT NOT NULL,
+                        title_tc           TEXT,
+                        title_sc           TEXT NOT NULL,
+                        author_tc          TEXT,
+                        author_sc          TEXT,
+                        content_txt        TEXT NOT NULL,
+                        content_bytes      INTEGER,
+                        content_sha256     TEXT,
+                        created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_accessed_at   TIMESTAMP
+                    )
+                    """
+                )
+            )
         self._ensure_column("author_tc", "TEXT")
         self._ensure_column("author_sc", "TEXT")
         self._ensure_column("category_tc", "TEXT")
@@ -369,6 +388,102 @@ class IndexStore:
                     """
                 ),
                 {"novel_id": novel_id},
+            )
+
+    def upsert_uploaded_document(
+        self,
+        *,
+        upload_id: str,
+        source_filename: str,
+        title_tc: str,
+        title_sc: str,
+        author_tc: str,
+        author_sc: str,
+        content_txt: str,
+        content_bytes: int,
+        content_sha256: str,
+    ):
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO uploaded_documents (
+                        upload_id,
+                        source_filename,
+                        title_tc,
+                        title_sc,
+                        author_tc,
+                        author_sc,
+                        content_txt,
+                        content_bytes,
+                        content_sha256,
+                        last_accessed_at
+                    )
+                    VALUES (
+                        :upload_id,
+                        :source_filename,
+                        :title_tc,
+                        :title_sc,
+                        :author_tc,
+                        :author_sc,
+                        :content_txt,
+                        :content_bytes,
+                        :content_sha256,
+                        CURRENT_TIMESTAMP
+                    )
+                    ON CONFLICT (upload_id) DO UPDATE SET
+                        source_filename = excluded.source_filename,
+                        title_tc = excluded.title_tc,
+                        title_sc = excluded.title_sc,
+                        author_tc = excluded.author_tc,
+                        author_sc = excluded.author_sc,
+                        content_txt = excluded.content_txt,
+                        content_bytes = excluded.content_bytes,
+                        content_sha256 = excluded.content_sha256,
+                        last_accessed_at = CURRENT_TIMESTAMP
+                    """
+                ),
+                {
+                    "upload_id": upload_id,
+                    "source_filename": source_filename,
+                    "title_tc": title_tc,
+                    "title_sc": title_sc,
+                    "author_tc": author_tc,
+                    "author_sc": author_sc,
+                    "content_txt": content_txt,
+                    "content_bytes": content_bytes,
+                    "content_sha256": content_sha256,
+                },
+            )
+
+    def get_uploaded_document(self, upload_id: str) -> dict[str, Any] | None:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT upload_id, source_filename, title_tc, title_sc, author_tc, author_sc,
+                           content_txt, content_bytes, content_sha256, created_at, last_accessed_at
+                    FROM uploaded_documents
+                    WHERE upload_id = :upload_id
+                    """
+                ),
+                {"upload_id": upload_id},
+            ).mappings().first()
+        if row is None:
+            return None
+        return dict(row)
+
+    def touch_uploaded_document(self, upload_id: str):
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE uploaded_documents
+                    SET last_accessed_at = CURRENT_TIMESTAMP
+                    WHERE upload_id = :upload_id
+                    """
+                ),
+                {"upload_id": upload_id},
             )
 
     def cached_novel_count(self) -> int:

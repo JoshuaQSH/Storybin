@@ -1,5 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
+from io import BytesIO
+from zipfile import ZipFile
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -461,3 +463,53 @@ async def test_admin_import_cached_novel_makes_search_and_download_available():
         assert download_resp.status_code == 200
         assert download_resp.headers["x-storybin-download-cache"] == "hit"
         assert "欢迎来到台湾。" in download_resp.text
+
+
+@pytest.mark.asyncio
+async def test_upload_convert_makes_simplified_txt_and_epub_available():
+    state = AppState(store=IndexStore(":memory:"), crawler_module=BlockedCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        upload_resp = await client.post(
+            "/convert/upload",
+            files={
+                "file": (
+                    "taiwan-love.txt",
+                    "《臺灣戀曲》\n作者：作者甲\n\n第1章 初見\n\n歡迎來到臺灣。\n".encode("utf-8"),
+                    "text/plain",
+                )
+            },
+        )
+        assert upload_resp.status_code == 200
+        payload = upload_resp.json()
+        assert payload["status"] == "converted"
+        assert payload["title"] == "台湾恋曲"
+        assert payload["author"] == "作者甲"
+        assert payload["txt_download_url"].endswith(f"/convert/uploaded/{payload['upload_id']}.txt")
+        assert payload["epub_download_url"].endswith(f"/convert/uploaded/{payload['upload_id']}.epub")
+
+        txt_resp = await client.get(payload["txt_download_url"])
+        assert txt_resp.status_code == 200
+        assert "欢迎来到台湾。" in txt_resp.text
+        assert "filename*=UTF-8''%E5%8F%B0%E6%B9%BE%E6%81%8B%E6%9B%B2.txt" in txt_resp.headers["content-disposition"]
+
+        epub_resp = await client.get(payload["epub_download_url"])
+        assert epub_resp.status_code == 200
+        assert epub_resp.headers["content-type"] == "application/epub+zip"
+        assert "filename*=UTF-8''%E5%8F%B0%E6%B9%BE%E6%81%8B%E6%9B%B2.epub" in epub_resp.headers["content-disposition"]
+        with ZipFile(BytesIO(epub_resp.content)) as archive:
+            chapter = archive.read("OEBPS/text/chapter-001.xhtml").decode("utf-8")
+            assert "欢迎来到台湾。" in chapter
+
+
+@pytest.mark.asyncio
+async def test_upload_convert_rejects_empty_files():
+    state = AppState(store=IndexStore(":memory:"), crawler_module=BlockedCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        upload_resp = await client.post(
+            "/convert/upload",
+            files={"file": ("empty.txt", b"", "text/plain")},
+        )
+        assert upload_resp.status_code == 400
+        assert "empty" in upload_resp.json()["detail"].lower()

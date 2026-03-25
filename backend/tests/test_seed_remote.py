@@ -3,6 +3,7 @@ import requests
 from app.crawler import BooklistPage, ChapterContent, NovelDetail, NovelMeta
 from app.seed_remote import (
     build_import_payload,
+    discover_all_novel_urls,
     discover_novel_urls,
     import_cached_novel,
     novel_url_from_id,
@@ -30,6 +31,19 @@ class DummyCrawler:
                         category="耽美同人",
                         url="https://www.xbanxia.cc/books/410182.html",
                     ),
+                ],
+                total_pages=2,
+            )
+        if page == 2:
+            return BooklistPage(
+                novels=[
+                    NovelMeta(
+                        novel_id="410199",
+                        title="第三本小說",
+                        author="作者丙",
+                        category="耽美同人",
+                        url="https://www.xbanxia.cc/books/410199.html",
+                    )
                 ],
                 total_pages=2,
             )
@@ -125,6 +139,29 @@ def test_discover_novel_urls_respects_limit():
     assert urls == ["https://www.xbanxia.cc/books/410113.html"]
 
 
+def test_discover_novel_urls_supports_parallel_page_fetch():
+    urls = discover_novel_urls(
+        page_start=1,
+        page_end=2,
+        category_id=1,
+        workers=2,
+        crawler_module=DummyCrawler(),
+    )
+
+    assert urls == [
+        "https://www.xbanxia.cc/books/410113.html",
+        "https://www.xbanxia.cc/books/410182.html",
+        "https://www.xbanxia.cc/books/410199.html",
+    ]
+
+
+def test_discover_all_novel_urls_uses_total_pages():
+    urls = discover_all_novel_urls(category_id=1, crawler_module=DummyCrawler())
+
+    assert len(urls) == 3
+    assert urls[-1].endswith("410199.html")
+
+
 def test_import_cached_novel_posts_expected_payload():
     session = FakeSession(
         [
@@ -185,3 +222,25 @@ def test_seed_novel_urls_collects_successes_and_failures(monkeypatch):
     assert imported == [{"status": "imported", "novel_id": "410113", "cache_storage_backend": "r2"}]
     assert len(failures) == 1
     assert failures[0]["novel_url"].endswith("missing.html")
+
+
+def test_seed_novel_urls_supports_parallel_workers(monkeypatch):
+    def fake_import_cached_novel(*, backend_url: str, admin_token: str, payload: dict, session=None, timeout: float = 180.0):
+        del backend_url, admin_token, session, timeout
+        return {"status": "imported", "novel_id": payload["novel_id"], "cache_storage_backend": "r2"}
+
+    monkeypatch.setattr("app.seed_remote.import_cached_novel", fake_import_cached_novel)
+
+    imported, failures = seed_novel_urls(
+        backend_url="https://storybin.onrender.com",
+        admin_token="secret",
+        novel_urls=[
+            "https://www.xbanxia.cc/books/410113.html",
+            "https://www.xbanxia.cc/books/410182.html",
+        ],
+        workers=2,
+        crawler_module=DummyCrawler(),
+    )
+
+    assert failures == []
+    assert [item["novel_id"] for item in imported] == ["410113", "410182"]

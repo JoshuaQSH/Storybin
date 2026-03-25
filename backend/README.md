@@ -15,6 +15,8 @@ Copy `.env.example` or set the equivalent environment variables in Render:
 - `R2_BUCKET`
 - `R2_KEY_PREFIX`
 - `R2_ENDPOINT_URL`
+- `CRAWLER_HTTP_PROXY`
+- `CRAWLER_HTTPS_PROXY`
 
 Set `CACHE_STORAGE_BACKEND=r2` to store finished novel `.txt` files in Cloudflare R2.
 When `CACHE_STORAGE_BACKEND=database`, the app keeps using the local database-backed
@@ -57,3 +59,26 @@ uv run python -m app.seed_remote \
   --page-end 2 \
   --limit 20
 ```
+
+To discover the whole category automatically and run a larger batch with a few workers:
+
+```bash
+uv run python -m app.seed_remote \
+  --backend-url https://storybin.onrender.com \
+  --admin-token "$ADMIN_TOKEN" \
+  --all-pages \
+  --workers 4
+```
+
+For deployments where Render cannot reach `xbanxia.cc` directly, you can point the
+crawler at an HTTP/HTTPS proxy by setting `CRAWLER_HTTP_PROXY` and
+`CRAWLER_HTTPS_PROXY`.
+
+## Upload Conversion
+
+The frontend now supports uploading a Traditional Chinese `.txt` novel exported from
+Tampermonkey or another browser tool. The backend converts it to Simplified Chinese,
+stores the converted text, and exposes two download formats:
+
+- Simplified Chinese `.txt`
+- Simplified Chinese `.epub`

@@ -36,6 +36,16 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
 R2_BUCKET = os.getenv("R2_BUCKET", "").strip()
 R2_KEY_PREFIX = os.getenv("R2_KEY_PREFIX", "novels").strip().strip("/")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "").strip()
+CRAWLER_HTTP_PROXY = os.getenv("CRAWLER_HTTP_PROXY", "").strip()
+CRAWLER_HTTPS_PROXY = os.getenv("CRAWLER_HTTPS_PROXY", "").strip()
+CRAWLER_PROXIES = {
+    scheme: proxy
+    for scheme, proxy in (
+        ("http", CRAWLER_HTTP_PROXY),
+        ("https", CRAWLER_HTTPS_PROXY),
+    )
+    if proxy
+}
 
 HEADERS = {
     "User-Agent": (
