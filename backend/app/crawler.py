@@ -259,6 +259,8 @@ def _request_text(
 
     if last_error is None:
         raise CrawlerHTTPError(f"Failed to fetch {url}: no fetch backends configured")
+    if isinstance(last_error, SourceSiteBlockedError):
+        raise last_error
     raise CrawlerHTTPError(f"Failed to fetch {url}: {last_error}") from last_error
 
 

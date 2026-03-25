@@ -391,3 +391,38 @@ async def test_download_uses_object_storage_when_r2_backend_is_enabled():
         assert "欢迎来到台湾。" in second.text
         assert len(crawler.detail_calls) == baseline_detail_calls + 1
         assert len(crawler.chapter_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_search_refreshes_documents_after_external_store_update():
+    store = IndexStore(":memory:")
+    state = AppState(store=store, crawler_module=BlockedCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        store.upsert_novels(
+            [
+                NovelMeta(
+                    novel_id="500001",
+                    title="臺灣新書",
+                    author="作者丁",
+                    category="測試分類",
+                    url="https://www.xbanxia.cc/books/500001.html",
+                )
+            ]
+        )
+        store.update_novel_detail(
+            NovelDetail(
+                novel_id="500001",
+                title="臺灣新書",
+                author="作者丁",
+                category="測試分類",
+                chapter_urls=[],
+                latest_update="2026-03-25",
+            )
+        )
+
+        resp = await client.get("/search", params={"q": "台湾新书"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["results"]
+        assert payload["results"][0]["novel_id"] == "500001"

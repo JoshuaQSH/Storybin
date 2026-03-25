@@ -136,3 +136,19 @@ def test_fetch_booklist_page_falls_back_to_playwright(monkeypatch):
 
     assert len(result) == 2
     assert result[0].title == "鱗鲛無月"
+
+
+def test_fetch_booklist_page_preserves_source_blocked_error_with_fallback_enabled(monkeypatch):
+    monkeypatch.setattr(crawler.config, "FETCH_BACKENDS", ("requests", "playwright"))
+
+    def blocked_requests(url: str, *, session, apply_rate_limit: bool):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+
+    def broken_playwright(url: str, *, apply_rate_limit: bool):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+
+    monkeypatch.setattr(crawler, "_request_response", blocked_requests)
+    monkeypatch.setattr(crawler, "_request_text_via_playwright", broken_playwright)
+
+    with pytest.raises(SourceSiteBlockedError):
+        fetch_booklist_page(1)

@@ -223,6 +223,11 @@ def _featured_results(state: AppState, limit: int) -> list[dict[str, Any]]:
     ]
 
 
+def _refresh_search_documents_if_needed(state: AppState):
+    if len(state.search_documents) != state.count:
+        state.refresh_search_documents()
+
+
 def _require_admin_token(x_admin_token: str | None, state: AppState):
     if x_admin_token != state.admin_token:
         raise HTTPException(status_code=401, detail="Invalid admin token.")
@@ -386,6 +391,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
         limit: int = Query(default=config.FEATURED_LIMIT, ge=1, le=20),
         state: AppState = Depends(get_state),
     ):
+        _refresh_search_documents_if_needed(state)
         if not state.index_complete:
             ensure_index_build(state)
         return {
@@ -400,6 +406,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
         limit: int = Query(default=20, ge=1, le=50),
         state: AppState = Depends(get_state),
     ):
+        _refresh_search_documents_if_needed(state)
         if not state.index_complete:
             ensure_index_build(state)
         return {
