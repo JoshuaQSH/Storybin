@@ -132,15 +132,19 @@
 
       .search-button {
         cursor: pointer;
+        border-color: rgba(201, 115, 82, 0.22);
         color: #603822;
-        background: linear-gradient(180deg, #f7e8df, #efd1c0);
-        box-shadow: 0 12px 24px rgba(126, 79, 50, 0.14);
-        transition: transform 140ms ease, box-shadow 140ms ease;
+        background: #f3ddd0;
+        transition:
+          transform 140ms ease,
+          background-color 140ms ease,
+          border-color 140ms ease;
       }
 
       .search-button:hover {
         transform: translateY(-1px);
-        box-shadow: 0 16px 28px rgba(126, 79, 50, 0.18);
+        background: #edd3c4;
+        border-color: rgba(201, 115, 82, 0.32);
       }
 
       .meta-row {
@@ -285,21 +289,28 @@
         color: #2f5642;
         text-decoration: none;
         white-space: nowrap;
-        background: linear-gradient(180deg, #eef6f1, #d6e7dc);
+        background: #dce9e1;
+        transition:
+          transform 140ms ease,
+          background-color 140ms ease,
+          border-color 140ms ease;
       }
 
       .download-link:hover {
-        background: linear-gradient(180deg, #f5faf7, #dcebe2);
+        transform: translateY(-1px);
+        background: #e4efe8;
+        border-color: rgba(73, 109, 87, 0.22);
       }
 
       .download-link.alt {
         border-color: rgba(152, 120, 60, 0.14);
         color: #715421;
-        background: linear-gradient(180deg, #fbf3e2, #f0dfbd);
+        background: #f0e0bf;
       }
 
       .download-link.alt:hover {
-        background: linear-gradient(180deg, #fff8ea, #f4e4c5);
+        background: #f4e7ca;
+        border-color: rgba(152, 120, 60, 0.22);
       }
 
       .assist-link {
