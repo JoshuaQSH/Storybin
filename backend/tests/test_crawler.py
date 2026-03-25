@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 from unittest.mock import MagicMock
 
 import pytest
@@ -158,6 +159,27 @@ def test_fetch_booklist_page_falls_back_to_curl_cffi(monkeypatch):
     assert result[0].title == "鱗鲛無月"
 
 
+def test_fetch_booklist_page_falls_back_to_windows_chrome(monkeypatch):
+    html = (FIXTURES / "booklist_page1.html").read_text(encoding="utf-8")
+
+    monkeypatch.setattr(crawler.config, "FETCH_BACKENDS", ("requests", "windows_chrome"))
+
+    def blocked_requests(url: str, *, session, apply_rate_limit: bool):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+
+    def fake_windows_chrome(url: str, *, apply_rate_limit: bool):
+        del url, apply_rate_limit
+        return html
+
+    monkeypatch.setattr(crawler, "_request_response", blocked_requests)
+    monkeypatch.setattr(crawler, "_request_text_via_windows_chrome", fake_windows_chrome)
+
+    result = fetch_booklist_page(1)
+
+    assert len(result) == 2
+    assert result[0].title == "鱗鲛無月"
+
+
 def test_fetch_booklist_page_preserves_source_blocked_error_with_fallback_enabled(monkeypatch):
     monkeypatch.setattr(crawler.config, "FETCH_BACKENDS", ("requests", "playwright"))
 
@@ -185,6 +207,22 @@ def test_fetch_booklist_page_preserves_source_blocked_error_with_curl_cffi_fallb
 
     monkeypatch.setattr(crawler, "_request_response", blocked_requests)
     monkeypatch.setattr(crawler, "_request_text_via_curl_cffi", blocked_curl_cffi)
+
+    with pytest.raises(SourceSiteBlockedError):
+        fetch_booklist_page(1)
+
+
+def test_fetch_booklist_page_preserves_source_blocked_error_with_windows_chrome_fallback_enabled(monkeypatch):
+    monkeypatch.setattr(crawler.config, "FETCH_BACKENDS", ("requests", "windows_chrome"))
+
+    def blocked_requests(url: str, *, session, apply_rate_limit: bool):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+
+    def blocked_windows_chrome(url: str, *, apply_rate_limit: bool):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+
+    monkeypatch.setattr(crawler, "_request_response", blocked_requests)
+    monkeypatch.setattr(crawler, "_request_text_via_windows_chrome", blocked_windows_chrome)
 
     with pytest.raises(SourceSiteBlockedError):
         fetch_booklist_page(1)
@@ -225,3 +263,43 @@ def test_curl_cffi_fetch_uses_proxy_config(monkeypatch):
 
     assert crawler._request_text_via_curl_cffi("https://example.com", apply_rate_limit=False) == html
     assert captured["proxies"] == {"https": "http://proxy.local:8080"}
+
+
+def test_windows_chrome_fetch_uses_subprocess(monkeypatch):
+    captured = {}
+    html = "<html><body>ok</body></html>"
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(cmd, 0, stdout=html, stderr="")
+
+    monkeypatch.setattr(crawler.config, "WINDOWS_CHROME_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+    monkeypatch.setattr(crawler.config, "WINDOWS_CHROME_TIMEOUT_SECONDS", 42.0)
+    monkeypatch.setattr(crawler.subprocess, "run", fake_run)
+
+    result = crawler._request_text_via_windows_chrome("https://example.com", apply_rate_limit=False)
+
+    assert result == html
+    assert captured["cmd"][:3] == ["powershell.exe", "-NoProfile", "-Command"]
+    assert "chrome.exe" in captured["cmd"][3]
+    assert "--dump-dom" in captured["cmd"][3]
+    assert "https://example.com" in captured["cmd"][3]
+    assert captured["kwargs"]["timeout"] == 42.0
+
+
+def test_windows_chrome_fetch_raises_source_blocked_for_cloudflare_html(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        del cmd, kwargs
+        return subprocess.CompletedProcess(
+            ["powershell.exe"],
+            0,
+            stdout="<title>Access denied | www.xbanxia.cc used Cloudflare to restrict access</title>",
+            stderr="",
+        )
+
+    monkeypatch.setattr(crawler.config, "WINDOWS_CHROME_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+    monkeypatch.setattr(crawler.subprocess, "run", fake_run)
+
+    with pytest.raises(SourceSiteBlockedError):
+        crawler._request_text_via_windows_chrome("https://example.com", apply_rate_limit=False)

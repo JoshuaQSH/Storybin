@@ -3,10 +3,51 @@
 from __future__ import annotations
 
 import os
+import shutil
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _windows_path_to_wsl_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    if len(normalized) >= 3 and normalized[1:3] == ":/":
+        drive = normalized[0].lower()
+        tail = normalized[3:]
+        return f"/mnt/{drive}/{tail}"
+    return normalized
+
+
+def _detect_windows_chrome_path() -> str:
+    configured = os.getenv("WINDOWS_CHROME_PATH", "").strip()
+    if configured:
+        return configured
+    if shutil.which("powershell.exe") is None:
+        return ""
+
+    for candidate in (
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ):
+        if os.path.exists(_windows_path_to_wsl_path(candidate)):
+            return candidate
+    return ""
+
+
+WINDOWS_CHROME_PATH = _detect_windows_chrome_path()
+
+
+def _default_fetch_backends() -> tuple[str, ...]:
+    configured = os.getenv("FETCH_BACKENDS", "").strip()
+    if configured:
+        return _split_csv(configured) or ("requests",)
+
+    backends = ["requests", "curl_cffi"]
+    if WINDOWS_CHROME_PATH:
+        backends.append("windows_chrome")
+    return tuple(backends)
 
 
 BASE_URL = os.getenv("BASE_URL", "https://www.xbanxia.cc")
@@ -18,11 +59,14 @@ INDEX_MAX_PAGES = int(os.getenv("INDEX_MAX_PAGES", "0"))
 FEATURED_LIMIT = int(os.getenv("FEATURED_LIMIT", "10"))
 CACHE_MAX_NOVELS = int(os.getenv("CACHE_MAX_NOVELS", "20000"))
 CACHE_PRUNE_TO_NOVELS = int(os.getenv("CACHE_PRUNE_TO_NOVELS", "16000"))
-FETCH_BACKENDS = _split_csv(os.getenv("FETCH_BACKENDS", "requests,curl_cffi")) or ("requests",)
+FETCH_BACKENDS = _default_fetch_backends()
 RATE_LIMIT_SECONDS = float(os.getenv("RATE_LIMIT_SECONDS", "1.5"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_BACKOFF = float(os.getenv("RETRY_BACKOFF", "2.0"))
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "20.0"))
+WINDOWS_CHROME_TIMEOUT_SECONDS = float(
+    os.getenv("WINDOWS_CHROME_TIMEOUT_SECONDS", str(REQUEST_TIMEOUT_SECONDS + 20.0))
+)
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "dev")
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
 ALLOWED_ORIGINS = _split_csv(ALLOWED_ORIGIN) if ALLOWED_ORIGIN != "*" else ("*",)

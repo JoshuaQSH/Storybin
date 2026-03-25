@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import dataclass
 import re
+import subprocess
 import time
 from urllib.parse import urljoin, urlparse
 
@@ -252,6 +253,11 @@ def _request_text(
                     url,
                     apply_rate_limit=apply_rate_limit,
                 )
+            if backend == "windows_chrome":
+                return _request_text_via_windows_chrome(
+                    url,
+                    apply_rate_limit=apply_rate_limit,
+                )
             if backend == "playwright":
                 return _request_text_via_playwright(
                     url,
@@ -363,6 +369,66 @@ def _request_text_via_curl_cffi(
     if _looks_like_blocked_html(html):
         raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
     return html
+
+
+def _request_text_via_windows_chrome(
+    url: str,
+    *,
+    apply_rate_limit: bool,
+) -> str:
+    chrome_path = config.WINDOWS_CHROME_PATH.strip()
+    if not chrome_path:
+        raise CrawlerHTTPError(
+            "Windows Chrome fallback is configured but WINDOWS_CHROME_PATH is not available."
+        )
+
+    if apply_rate_limit and config.RATE_LIMIT_SECONDS > 0:
+        time.sleep(config.RATE_LIMIT_SECONDS)
+
+    powershell_script = " ".join(
+        [
+            f"& '{_powershell_single_quote(chrome_path)}'",
+            "--headless=new",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "--dump-dom",
+            f"'{_powershell_single_quote(url)}'",
+        ]
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", powershell_script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=config.WINDOWS_CHROME_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CrawlerHTTPError(
+            "Windows Chrome fallback requires powershell.exe to be available from this environment."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CrawlerHTTPError(f"Windows Chrome timed out while fetching {url}") from exc
+
+    html = completed.stdout
+    stderr = completed.stderr.strip()
+    if completed.returncode != 0 and not html:
+        raise CrawlerHTTPError(
+            f"Windows Chrome failed to fetch {url}: {stderr or f'exit code {completed.returncode}'}"
+        )
+    if not html.strip():
+        raise CrawlerHTTPError(f"Windows Chrome returned empty DOM for {url}")
+    if _looks_like_blocked_html(html):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+    return html
+
+
+def _powershell_single_quote(value: str) -> str:
+    return value.replace("'", "''")
 
 
 def _required_text(node: BeautifulSoup | Tag, selector: str, label: str) -> str:
@@ -479,7 +545,16 @@ def _looks_like_cloudflare_block(response: requests.Response | None) -> bool:
 
 def _looks_like_blocked_html(body: str) -> bool:
     normalized = body.lower()
-    return "just a moment..." in normalized or "cloudflare" in normalized
+    return any(
+        token in normalized
+        for token in (
+            "just a moment",
+            "cloudflare",
+            "access denied |",
+            "error code 1006",
+            "attention required",
+        )
+    )
 
 
 def _extract_total_pages(node: BeautifulSoup | Tag) -> int | None:
