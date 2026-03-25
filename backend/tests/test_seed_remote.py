@@ -3,10 +3,13 @@ import requests
 from app.crawler import BooklistPage, ChapterContent, NovelDetail, NovelMeta
 from app.seed_remote import (
     build_import_payload,
+    build_or_load_payload,
     discover_all_novel_urls,
     discover_novel_urls,
     import_cached_novel,
+    import_spooled_payloads,
     novel_url_from_id,
+    payload_path_for_novel_url,
     seed_novel_urls,
 )
 
@@ -244,3 +247,62 @@ def test_seed_novel_urls_supports_parallel_workers(monkeypatch):
 
     assert failures == []
     assert [item["novel_id"] for item in imported] == ["410113", "410182"]
+
+
+def test_seed_novel_urls_can_spool_without_import(tmp_path):
+    imported, failures = seed_novel_urls(
+        backend_url="https://storybin.onrender.com",
+        admin_token="secret",
+        novel_urls=["https://www.xbanxia.cc/books/410113.html"],
+        spool_dir=str(tmp_path),
+        spool_only=True,
+        crawler_module=DummyCrawler(),
+    )
+
+    assert failures == []
+    assert imported[0]["status"] == "spooled"
+    payload_path = tmp_path / "410113.json"
+    assert payload_path.exists()
+    assert "二十年夏" in payload_path.read_text(encoding="utf-8")
+
+
+def test_build_or_load_payload_reuses_spooled_json(tmp_path):
+    payload_path = payload_path_for_novel_url("https://www.xbanxia.cc/books/410113.html", str(tmp_path))
+    payload_path.write_text(
+        '{"novel_id":"410113","title":"二十年夏","author":"吟稀","category":"耽美同人","url":"https://www.xbanxia.cc/books/410113.html","content_txt":"cached","chapter_count":1,"latest_update":"2026-03-24"}',
+        encoding="utf-8",
+    )
+
+    class FailingCrawler(DummyCrawler):
+        def fetch_novel_detail(self, novel_url: str):
+            raise AssertionError(f"should not crawl {novel_url}")
+
+    payload = build_or_load_payload(
+        "https://www.xbanxia.cc/books/410113.html",
+        spool_dir=str(tmp_path),
+        crawler_module=FailingCrawler(),
+    )
+
+    assert payload["content_txt"] == "cached"
+
+
+def test_import_spooled_payloads_uploads_saved_json(monkeypatch, tmp_path):
+    (tmp_path / "410113.json").write_text(
+        '{"novel_id":"410113","title":"二十年夏","author":"吟稀","category":"耽美同人","url":"https://www.xbanxia.cc/books/410113.html","content_txt":"cached","chapter_count":1,"latest_update":"2026-03-24"}',
+        encoding="utf-8",
+    )
+
+    def fake_import_cached_novel(*, backend_url: str, admin_token: str, payload: dict, session=None, timeout: float = 180.0):
+        del backend_url, admin_token, session, timeout
+        return {"status": "imported", "novel_id": payload["novel_id"], "cache_storage_backend": "r2"}
+
+    monkeypatch.setattr("app.seed_remote.import_cached_novel", fake_import_cached_novel)
+
+    imported, failures = import_spooled_payloads(
+        backend_url="https://storybin.onrender.com",
+        admin_token="secret",
+        spool_dir=str(tmp_path),
+    )
+
+    assert failures == []
+    assert imported == [{"status": "imported", "novel_id": "410113", "cache_storage_backend": "r2"}]

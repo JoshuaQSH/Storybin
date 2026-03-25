@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+from pathlib import Path
 from typing import Any, Sequence
 
 import requests
@@ -139,6 +140,8 @@ def seed_novel_urls(
     admin_token: str,
     novel_urls: Sequence[str],
     workers: int = 1,
+    spool_dir: str | None = None,
+    spool_only: bool = False,
     crawler_module: Any = crawler,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     if workers > 1:
@@ -147,6 +150,8 @@ def seed_novel_urls(
             admin_token=admin_token,
             novel_urls=novel_urls,
             workers=workers,
+            spool_dir=spool_dir,
+            spool_only=spool_only,
             crawler_module=crawler_module,
         )
 
@@ -156,13 +161,25 @@ def seed_novel_urls(
     with requests.Session() as session:
         for novel_url in novel_urls:
             try:
-                payload = build_import_payload(novel_url, crawler_module=crawler_module)
-                response = import_cached_novel(
-                    backend_url=backend_url,
-                    admin_token=admin_token,
-                    payload=payload,
-                    session=session,
+                payload = build_or_load_payload(
+                    novel_url,
+                    spool_dir=spool_dir,
+                    crawler_module=crawler_module,
                 )
+                if spool_only:
+                    response = {
+                        "status": "spooled",
+                        "novel_id": payload["novel_id"],
+                        "title": payload["title"],
+                        "chapter_count": payload["chapter_count"],
+                    }
+                else:
+                    response = import_cached_novel(
+                        backend_url=backend_url,
+                        admin_token=admin_token,
+                        payload=payload,
+                        session=session,
+                    )
                 imported.append(response)
             except Exception as exc:
                 failures.append({"novel_url": novel_url, "error": str(exc)})
@@ -176,6 +193,8 @@ def _seed_novel_urls_parallel(
     admin_token: str,
     novel_urls: Sequence[str],
     workers: int,
+    spool_dir: str | None,
+    spool_only: bool,
     crawler_module: Any,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     imported_by_index: dict[int, dict[str, Any]] = {}
@@ -189,6 +208,8 @@ def _seed_novel_urls_parallel(
                 novel_url,
                 backend_url=backend_url,
                 admin_token=admin_token,
+                spool_dir=spool_dir,
+                spool_only=spool_only,
                 crawler_module=crawler_module,
             ): index
             for index, novel_url in enumerate(novel_urls)
@@ -211,10 +232,139 @@ def _seed_single_url(
     *,
     backend_url: str,
     admin_token: str,
+    spool_dir: str | None,
+    spool_only: bool,
     crawler_module: Any,
 ) -> tuple[int, dict[str, Any] | None, dict[str, str] | None]:
     try:
-        payload = build_import_payload(novel_url, crawler_module=crawler_module)
+        payload = build_or_load_payload(
+            novel_url,
+            spool_dir=spool_dir,
+            crawler_module=crawler_module,
+        )
+        if spool_only:
+            response = {
+                "status": "spooled",
+                "novel_id": payload["novel_id"],
+                "title": payload["title"],
+                "chapter_count": payload["chapter_count"],
+            }
+        else:
+            response = import_cached_novel(
+                backend_url=backend_url,
+                admin_token=admin_token,
+                payload=payload,
+            )
+        return index, response, None
+    except Exception as exc:
+        return index, None, {"novel_url": novel_url, "error": str(exc)}
+
+
+def build_or_load_payload(
+    novel_url: str,
+    *,
+    spool_dir: str | None,
+    crawler_module: Any = crawler,
+) -> dict[str, Any]:
+    payload_path = payload_path_for_novel_url(novel_url, spool_dir) if spool_dir else None
+    if payload_path is not None and payload_path.exists():
+        return json.loads(payload_path.read_text(encoding="utf-8"))
+
+    payload = build_import_payload(novel_url, crawler_module=crawler_module)
+    if payload_path is not None:
+        save_payload(payload_path, payload)
+    return payload
+
+
+def payload_path_for_novel_url(novel_url: str, spool_dir: str | None) -> Path:
+    if not spool_dir:
+        raise ValueError("spool_dir is required to build a payload path.")
+    return Path(spool_dir).expanduser() / f"{crawler._extract_novel_id(novel_url)}.json"
+
+
+def save_payload(path: Path, payload: dict[str, Any]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def import_spooled_payloads(
+    *,
+    backend_url: str,
+    admin_token: str,
+    spool_dir: str,
+    workers: int = 1,
+    limit: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    payload_paths = sorted(Path(spool_dir).expanduser().glob("*.json"))
+    if limit is not None:
+        payload_paths = payload_paths[:limit]
+
+    if workers > 1:
+        return _import_spooled_payloads_parallel(
+            backend_url=backend_url,
+            admin_token=admin_token,
+            payload_paths=payload_paths,
+            workers=workers,
+        )
+
+    imported: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    with requests.Session() as session:
+        for path in payload_paths:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                response = import_cached_novel(
+                    backend_url=backend_url,
+                    admin_token=admin_token,
+                    payload=payload,
+                    session=session,
+                )
+                imported.append(response)
+            except Exception as exc:
+                failures.append({"payload_path": str(path), "error": str(exc)})
+    return imported, failures
+
+
+def _import_spooled_payloads_parallel(
+    *,
+    backend_url: str,
+    admin_token: str,
+    payload_paths: Sequence[Path],
+    workers: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    imported_by_index: dict[int, dict[str, Any]] = {}
+    failures_by_index: dict[int, dict[str, str]] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _import_single_payload_path,
+                index,
+                path,
+                backend_url=backend_url,
+                admin_token=admin_token,
+            ): index
+            for index, path in enumerate(payload_paths)
+        }
+        for future in as_completed(futures):
+            index, imported, failure = future.result()
+            if imported is not None:
+                imported_by_index[index] = imported
+            if failure is not None:
+                failures_by_index[index] = failure
+    imported = [imported_by_index[index] for index in sorted(imported_by_index)]
+    failures = [failures_by_index[index] for index in sorted(failures_by_index)]
+    return imported, failures
+
+
+def _import_single_payload_path(
+    index: int,
+    path: Path,
+    *,
+    backend_url: str,
+    admin_token: str,
+) -> tuple[int, dict[str, Any] | None, dict[str, str] | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
         response = import_cached_novel(
             backend_url=backend_url,
             admin_token=admin_token,
@@ -222,7 +372,7 @@ def _seed_single_url(
         )
         return index, response, None
     except Exception as exc:
-        return index, None, {"novel_url": novel_url, "error": str(exc)}
+        return index, None, {"payload_path": str(path), "error": str(exc)}
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -241,11 +391,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--all-pages", action="store_true", help="Auto-discover every list page for the category.")
     parser.add_argument("--workers", type=int, default=1, help="Concurrent workers for discovery/import.")
+    parser.add_argument("--spool-dir", help="Optional local directory for cached JSON payloads.")
+    parser.add_argument("--spool-only", action="store_true", help="Crawl and save payloads locally without importing.")
+    parser.add_argument("--import-from-spool", help="Import previously saved JSON payloads from this directory.")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+
+    if args.import_from_spool:
+        imported, failures = import_spooled_payloads(
+            backend_url=args.backend_url,
+            admin_token=args.admin_token,
+            spool_dir=args.import_from_spool,
+            workers=max(1, args.workers),
+            limit=args.limit,
+        )
+        for result in imported:
+            print(json.dumps(result, ensure_ascii=False))
+        for failure in failures:
+            print(json.dumps(failure, ensure_ascii=False))
+        return 1 if failures else 0
+
     novel_urls = [*args.novel_url, *(novel_url_from_id(novel_id) for novel_id in args.novel_id)]
 
     if not novel_urls:
@@ -274,6 +442,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         admin_token=args.admin_token,
         novel_urls=novel_urls,
         workers=max(1, args.workers),
+        spool_dir=args.spool_dir,
+        spool_only=args.spool_only,
     )
 
     for result in imported:

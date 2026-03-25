@@ -70,6 +70,27 @@ uv run python -m app.seed_remote \
   --workers 4
 ```
 
+If you want a resumable local crawl, save each converted novel as a JSON payload first:
+
+```bash
+uv run python -m app.seed_remote \
+  --backend-url https://storybin.onrender.com \
+  --admin-token "$ADMIN_TOKEN" \
+  --all-pages \
+  --spool-dir ./data/seed_spool \
+  --spool-only
+```
+
+Then import those saved payloads later without crawling the source site again:
+
+```bash
+uv run python -m app.seed_remote \
+  --backend-url https://storybin.onrender.com \
+  --admin-token "$ADMIN_TOKEN" \
+  --import-from-spool ./data/seed_spool \
+  --workers 2
+```
+
 For deployments where Render cannot reach `xbanxia.cc` directly, you can point the
 crawler at an HTTP/HTTPS proxy by setting `CRAWLER_HTTP_PROXY` and
 `CRAWLER_HTTPS_PROXY`.
