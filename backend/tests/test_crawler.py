@@ -138,6 +138,26 @@ def test_fetch_booklist_page_falls_back_to_playwright(monkeypatch):
     assert result[0].title == "鱗鲛無月"
 
 
+def test_fetch_booklist_page_falls_back_to_curl_cffi(monkeypatch):
+    html = (FIXTURES / "booklist_page1.html").read_text(encoding="utf-8")
+
+    monkeypatch.setattr(crawler.config, "FETCH_BACKENDS", ("requests", "curl_cffi"))
+
+    def blocked_requests(url: str, *, session, apply_rate_limit: bool):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+
+    def fake_curl_cffi(url: str, *, apply_rate_limit: bool):
+        return html
+
+    monkeypatch.setattr(crawler, "_request_response", blocked_requests)
+    monkeypatch.setattr(crawler, "_request_text_via_curl_cffi", fake_curl_cffi)
+
+    result = fetch_booklist_page(1)
+
+    assert len(result) == 2
+    assert result[0].title == "鱗鲛無月"
+
+
 def test_fetch_booklist_page_preserves_source_blocked_error_with_fallback_enabled(monkeypatch):
     monkeypatch.setattr(crawler.config, "FETCH_BACKENDS", ("requests", "playwright"))
 
@@ -149,6 +169,22 @@ def test_fetch_booklist_page_preserves_source_blocked_error_with_fallback_enable
 
     monkeypatch.setattr(crawler, "_request_response", blocked_requests)
     monkeypatch.setattr(crawler, "_request_text_via_playwright", broken_playwright)
+
+    with pytest.raises(SourceSiteBlockedError):
+        fetch_booklist_page(1)
+
+
+def test_fetch_booklist_page_preserves_source_blocked_error_with_curl_cffi_fallback_enabled(monkeypatch):
+    monkeypatch.setattr(crawler.config, "FETCH_BACKENDS", ("requests", "curl_cffi"))
+
+    def blocked_requests(url: str, *, session, apply_rate_limit: bool):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+
+    def blocked_curl_cffi(url: str, *, apply_rate_limit: bool):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+
+    monkeypatch.setattr(crawler, "_request_response", blocked_requests)
+    monkeypatch.setattr(crawler, "_request_text_via_curl_cffi", blocked_curl_cffi)
 
     with pytest.raises(SourceSiteBlockedError):
         fetch_booklist_page(1)

@@ -246,6 +246,11 @@ def _request_text(
                     apply_rate_limit=apply_rate_limit,
                 )
                 return response.text
+            if backend == "curl_cffi":
+                return _request_text_via_curl_cffi(
+                    url,
+                    apply_rate_limit=apply_rate_limit,
+                )
             if backend == "playwright":
                 return _request_text_via_playwright(
                     url,
@@ -315,6 +320,41 @@ def _request_text_via_playwright(
             raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
         raise CrawlerHTTPError(f"Playwright failed to fetch {url}: HTTP {status}")
     if "Just a moment..." in html or "cloudflare" in html.lower():
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+    return html
+
+
+def _request_text_via_curl_cffi(
+    url: str,
+    *,
+    apply_rate_limit: bool,
+) -> str:
+    try:
+        from curl_cffi import requests as curl_requests
+    except ImportError as exc:  # pragma: no cover - depends on runtime installation.
+        raise CrawlerHTTPError(
+            "curl_cffi fallback is configured but curl-cffi is not installed."
+        ) from exc
+
+    if apply_rate_limit and config.RATE_LIMIT_SECONDS > 0:
+        time.sleep(config.RATE_LIMIT_SECONDS)
+
+    try:
+        response = curl_requests.get(
+            url,
+            headers=config.HEADERS,
+            timeout=config.REQUEST_TIMEOUT_SECONDS,
+            impersonate="chrome",
+        )
+    except curl_requests.RequestsError as exc:  # pragma: no cover - exercised in live probing only.
+        raise CrawlerHTTPError(f"curl_cffi failed to fetch {url}: {exc}") from exc
+
+    html = response.text
+    if response.status_code >= 400:
+        if response.status_code == 403 or _looks_like_blocked_html(html):
+            raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+        raise CrawlerHTTPError(f"curl_cffi failed to fetch {url}: HTTP {response.status_code}")
+    if _looks_like_blocked_html(html):
         raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
     return html
 
@@ -428,7 +468,12 @@ def _looks_like_cloudflare_block(response: requests.Response | None) -> bool:
     if response is None or response.status_code != 403:
         return False
     body = response.text or ""
-    return "Just a moment..." in body or "cloudflare" in body.lower()
+    return _looks_like_blocked_html(body)
+
+
+def _looks_like_blocked_html(body: str) -> bool:
+    normalized = body.lower()
+    return "just a moment..." in normalized or "cloudflare" in normalized
 
 
 def _extract_total_pages(node: BeautifulSoup | Tag) -> int | None:

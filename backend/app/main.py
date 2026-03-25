@@ -25,6 +25,7 @@ from app.crawler import (
     SourceSiteBlockedError,
 )
 from app.index_store import IndexStore
+from app.rendering import render_novel
 from app.search import SearchDocument, fuzzy_search
 from app.storage import ObjectStorageError, build_object_storage_from_config
 
@@ -255,24 +256,6 @@ def _download_headers(title: str) -> dict[str, str]:
     }
 
 
-def _render_novel(detail, fetch_chapter_fn) -> dict[str, Any]:
-    title_sc = to_simplified(detail.title)
-    author_sc = to_simplified(detail.author)
-    parts = [f"《{title_sc}》", f"作者：{author_sc}", ""]
-
-    for chapter_number, chapter_url in enumerate(detail.chapter_urls, start=1):
-        chapter = fetch_chapter_fn(chapter_url)
-        chapter_title = to_simplified(chapter.title)
-        chapter_body = to_simplified(chapter.body)
-        parts.extend([f"第{chapter_number}章 {chapter_title}", "", chapter_body, ""])
-
-    return {
-        "title_sc": title_sc,
-        "content_txt": "\n".join(parts).strip() + "\n",
-        "chapter_count": len(detail.chapter_urls),
-    }
-
-
 def _stream_text(text: str) -> Any:
     def iterator():
         yield text
@@ -335,7 +318,7 @@ def _cache_or_get_novel(state: AppState, novel: dict[str, Any]) -> tuple[dict[st
         return cached, True
 
     detail = state.crawler_module.fetch_novel_detail(novel["url"])
-    rendered = _render_novel(detail, state.crawler_module.fetch_chapter)
+    rendered = render_novel(detail, state.crawler_module.fetch_chapter)
     _persist_cached_novel(state, novel["novel_id"], rendered)
     cached = state.store.get_cached_novel(novel["novel_id"])
     if cached is None:  # pragma: no cover - defensive guard

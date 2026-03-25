@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 from typing import Iterator, Protocol
 
 import boto3
@@ -69,12 +70,7 @@ class R2NovelStorage:
             raise ObjectStorageError(f"Failed to download {object_key} from R2: {exc}") from exc
 
         body = response["Body"]
-        try:
-            for chunk in body.iter_chunks(chunk_size=chunk_size):
-                if chunk:
-                    yield chunk.decode("utf-8")
-        finally:
-            body.close()
+        return _iter_decoded_utf8_chunks(body.iter_chunks(chunk_size=chunk_size), body)
 
     def _object_key(self, key: str) -> str:
         normalized = key.lstrip("/")
@@ -109,3 +105,24 @@ def build_object_storage_from_config() -> NovelObjectStorage | None:
         secret_access_key=config.R2_SECRET_ACCESS_KEY,
         key_prefix=config.R2_KEY_PREFIX,
     )
+
+
+def _iter_decoded_utf8_chunks(byte_chunks: Iterator[bytes], closable: object | None = None) -> Iterator[str]:
+    decoder = codecs.getincrementaldecoder("utf-8")()
+
+    def iterator() -> Iterator[str]:
+        try:
+            for chunk in byte_chunks:
+                if not chunk:
+                    continue
+                decoded = decoder.decode(chunk)
+                if decoded:
+                    yield decoded
+            remainder = decoder.decode(b"", final=True)
+            if remainder:
+                yield remainder
+        finally:
+            if closable is not None and hasattr(closable, "close"):
+                closable.close()
+
+    return iterator()

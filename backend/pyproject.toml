@@ -17,6 +17,7 @@ dependencies = [
     "requests>=2.31.0",
     "sqlalchemy>=2.0.0",
     "uvicorn[standard]>=0.29.0",
+    "curl-cffi>=0.14.0",
 ]
 
 [dependency-groups]
