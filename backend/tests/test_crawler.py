@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
+from app import crawler
 from app.crawler import (
     SourceSiteBlockedError,
     crawl_full_novel,
@@ -115,3 +116,23 @@ def test_crawl_full_novel_assembles_text():
     assert "類型：耽美同人" in result
     assert "正值酷暑" in result
     assert "初見" in result
+
+
+def test_fetch_booklist_page_falls_back_to_playwright(monkeypatch):
+    html = (FIXTURES / "booklist_page1.html").read_text(encoding="utf-8")
+
+    monkeypatch.setattr(crawler.config, "FETCH_BACKENDS", ("requests", "playwright"))
+
+    def blocked_requests(url: str, *, session, apply_rate_limit: bool):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+
+    def fake_playwright(url: str, *, apply_rate_limit: bool):
+        return html
+
+    monkeypatch.setattr(crawler, "_request_response", blocked_requests)
+    monkeypatch.setattr(crawler, "_request_text_via_playwright", fake_playwright)
+
+    result = fetch_booklist_page(1)
+
+    assert len(result) == 2
+    assert result[0].title == "鱗鲛無月"

@@ -18,6 +18,7 @@ INDEX_MAX_PAGES = int(os.getenv("INDEX_MAX_PAGES", "0"))
 FEATURED_LIMIT = int(os.getenv("FEATURED_LIMIT", "10"))
 CACHE_MAX_NOVELS = int(os.getenv("CACHE_MAX_NOVELS", "20000"))
 CACHE_PRUNE_TO_NOVELS = int(os.getenv("CACHE_PRUNE_TO_NOVELS", "16000"))
+FETCH_BACKENDS = _split_csv(os.getenv("FETCH_BACKENDS", "requests")) or ("requests",)
 RATE_LIMIT_SECONDS = float(os.getenv("RATE_LIMIT_SECONDS", "1.5"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_BACKOFF = float(os.getenv("RETRY_BACKOFF", "2.0"))
@@ -28,6 +29,13 @@ ALLOWED_ORIGINS = _split_csv(ALLOWED_ORIGIN) if ALLOWED_ORIGIN != "*" else ("*",
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip() or None
 DB_PATH = os.getenv("DB_PATH", "data/banxia_cache.sqlite3")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+CACHE_STORAGE_BACKEND = os.getenv("CACHE_STORAGE_BACKEND", "database").strip().lower() or "database"
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "").strip()
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+R2_BUCKET = os.getenv("R2_BUCKET", "").strip()
+R2_KEY_PREFIX = os.getenv("R2_KEY_PREFIX", "novels").strip().strip("/")
+R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "").strip()
 
 HEADERS = {
     "User-Agent": (

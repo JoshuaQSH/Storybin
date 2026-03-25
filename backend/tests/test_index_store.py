@@ -96,6 +96,28 @@ def test_file_backed_store_persists_cached_index(tmp_path):
         reopened.close()
 
 
+def test_file_backed_store_persists_cached_novel(tmp_path):
+    db_path = tmp_path / "cache.sqlite3"
+
+    store = IndexStore(str(db_path))
+    store.upsert_cached_novel(
+        novel_id="001",
+        title_sc="台湾恋曲",
+        content_txt="《台湾恋曲》\n作者：作者甲\n",
+        chapter_count=2,
+    )
+    store.close()
+
+    reopened = IndexStore(str(db_path))
+    try:
+        record = reopened.get_cached_novel("001")
+        assert record is not None
+        assert record["title_sc"] == "台湾恋曲"
+        assert record["chapter_count"] == 2
+    finally:
+        reopened.close()
+
+
 def test_prune_oldest_novels_prefers_unaccessed_rows():
     store = IndexStore(":memory:")
     store.upsert_novels(
@@ -117,6 +139,32 @@ def test_prune_oldest_novels_prefers_unaccessed_rows():
     assert store.get_novel_by_id("001") is not None
     assert store.get_novel_by_id("002") is None
     assert store.get_novel_by_id("003") is not None
+
+
+def test_prune_oldest_novels_removes_cached_downloads():
+    store = IndexStore(":memory:")
+    store.upsert_novels(
+        [
+            make_novel("001", "臺灣戀曲"),
+            make_novel("002", "歡迎光臨"),
+            make_novel("003", "臺灣甜心"),
+        ]
+    )
+    store.upsert_cached_novel(
+        novel_id="002",
+        title_sc="欢迎光临",
+        content_txt="cached",
+        chapter_count=1,
+    )
+    with store.engine.begin() as conn:
+        conn.execute(text("UPDATE novels SET indexed_at = '2026-03-10 00:00:00' WHERE novel_id = '001'"))
+        conn.execute(text("UPDATE novels SET indexed_at = '2026-03-11 00:00:00' WHERE novel_id = '002'"))
+        conn.execute(text("UPDATE novels SET indexed_at = '2026-03-12 00:00:00' WHERE novel_id = '003'"))
+        conn.execute(text("UPDATE novels SET last_accessed_at = '2026-03-14 09:00:00' WHERE novel_id = '001'"))
+
+    store.prune_oldest_novels(max_novels=2, prune_to_novels=2)
+
+    assert store.get_cached_novel("002") is None
 
 
 def test_resolve_database_url_uses_sqlite_memory_by_default():

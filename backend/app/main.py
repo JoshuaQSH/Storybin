@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+import hashlib
 import logging
 from typing import Any
 from urllib.parse import quote
@@ -24,6 +25,7 @@ from app.crawler import (
 )
 from app.index_store import IndexStore
 from app.search import SearchDocument, fuzzy_search
+from app.storage import ObjectStorageError, build_object_storage_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,8 @@ class AppState:
     store: IndexStore = field(default_factory=lambda: IndexStore(config.DB_PATH, database_url=config.DATABASE_URL))
     crawler_module: Any = crawler
     admin_token: str = config.ADMIN_TOKEN
+    cache_storage_backend: str = config.CACHE_STORAGE_BACKEND
+    object_storage: Any = field(default_factory=build_object_storage_from_config)
     auto_start_index_build: bool = True
     booklist_category_ids: tuple[int, ...] = field(
         default_factory=lambda: config.BOOKLIST_CATEGORY_IDS
@@ -63,6 +67,10 @@ class AppState:
     @property
     def count(self) -> int:
         return self.store.count()
+
+    @property
+    def cached_novel_count(self) -> int:
+        return self.store.cached_novel_count()
 
     def refresh_search_documents(self):
         self.search_documents = self.store.get_search_documents()
@@ -230,22 +238,92 @@ def _download_headers(title: str) -> dict[str, str]:
     }
 
 
-def _stream_novel(detail, fetch_chapter_fn) -> Any:
+def _render_novel(detail, fetch_chapter_fn) -> dict[str, Any]:
     title_sc = to_simplified(detail.title)
     author_sc = to_simplified(detail.author)
+    parts = [f"《{title_sc}》", f"作者：{author_sc}", ""]
 
+    for chapter_number, chapter_url in enumerate(detail.chapter_urls, start=1):
+        chapter = fetch_chapter_fn(chapter_url)
+        chapter_title = to_simplified(chapter.title)
+        chapter_body = to_simplified(chapter.body)
+        parts.extend([f"第{chapter_number}章 {chapter_title}", "", chapter_body, ""])
+
+    return {
+        "title_sc": title_sc,
+        "content_txt": "\n".join(parts).strip() + "\n",
+        "chapter_count": len(detail.chapter_urls),
+    }
+
+
+def _stream_text(text: str) -> Any:
     def iterator():
-        yield f"《{title_sc}》\n"
-        yield f"作者：{author_sc}\n\n"
-        for chapter_number, chapter_url in enumerate(detail.chapter_urls, start=1):
-            chapter = fetch_chapter_fn(chapter_url)
-            chapter_title = to_simplified(chapter.title)
-            chapter_body = to_simplified(chapter.body)
-            yield f"第{chapter_number}章 {chapter_title}\n\n"
-            yield chapter_body
-            yield "\n\n"
+        yield text
 
     return iterator()
+
+
+def _stream_cached_novel(state: AppState, cached: dict[str, Any]) -> Any:
+    if cached["storage_backend"] == "r2":
+        if state.object_storage is None or not cached["object_key"]:
+            raise RuntimeError("R2 cache is enabled but the object storage client is unavailable.")
+        return state.object_storage.iter_text(cached["object_key"])
+    return _stream_text(cached["content_txt"])
+
+
+def _cache_object_key(novel_id: str, content_sha256: str) -> str:
+    return f"{novel_id}/{content_sha256}.txt"
+
+
+def _persist_cached_novel(state: AppState, novel_id: str, rendered: dict[str, Any]):
+    content_txt = rendered["content_txt"]
+    content_bytes = len(content_txt.encode("utf-8"))
+    content_sha256 = hashlib.sha256(content_txt.encode("utf-8")).hexdigest()
+
+    if state.cache_storage_backend == "r2":
+        if state.object_storage is None:
+            raise RuntimeError("CACHE_STORAGE_BACKEND is set to r2 but object storage is not configured.")
+        uploaded = state.object_storage.put_text(
+            _cache_object_key(novel_id, content_sha256),
+            content_txt,
+        )
+        state.store.upsert_cached_novel(
+            novel_id=novel_id,
+            title_sc=rendered["title_sc"],
+            content_txt="",
+            storage_backend="r2",
+            object_key=str(uploaded["object_key"]),
+            content_bytes=int(uploaded["content_bytes"]),
+            content_sha256=content_sha256,
+            chapter_count=rendered["chapter_count"],
+        )
+        return
+
+    state.store.upsert_cached_novel(
+        novel_id=novel_id,
+        title_sc=rendered["title_sc"],
+        content_txt=content_txt,
+        storage_backend="database",
+        object_key=None,
+        content_bytes=content_bytes,
+        content_sha256=content_sha256,
+        chapter_count=rendered["chapter_count"],
+    )
+
+
+def _cache_or_get_novel(state: AppState, novel: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    cached = state.store.get_cached_novel(novel["novel_id"])
+    if cached is not None:
+        state.store.touch_cached_novel(novel["novel_id"])
+        return cached, True
+
+    detail = state.crawler_module.fetch_novel_detail(novel["url"])
+    rendered = _render_novel(detail, state.crawler_module.fetch_chapter)
+    _persist_cached_novel(state, novel["novel_id"], rendered)
+    cached = state.store.get_cached_novel(novel["novel_id"])
+    if cached is None:  # pragma: no cover - defensive guard
+        raise RuntimeError(f"Failed to cache novel {novel['novel_id']}")
+    return cached, False
 
 
 def create_app(state: AppState | None = None) -> FastAPI:
@@ -288,6 +366,8 @@ def create_app(state: AppState | None = None) -> FastAPI:
         return {
             "index_status": state.index_status,
             "indexed_count": state.count,
+            "cached_novel_count": state.cached_novel_count,
+            "cache_storage_backend": state.cache_storage_backend,
             "index_complete": state.index_complete,
             "pages_crawled": state.pages_crawled,
             "pages_total": state.pages_total,
@@ -341,14 +421,18 @@ def create_app(state: AppState | None = None) -> FastAPI:
             )
         state.store.touch_novels([novel_id])
         try:
-            detail = state.crawler_module.fetch_novel_detail(novel["url"])
-        except (CrawlerHTTPError, CrawlerParseError) as exc:
+            cached, cache_hit = _cache_or_get_novel(state, novel)
+            stream = _stream_cached_novel(state, cached)
+        except (CrawlerHTTPError, CrawlerParseError, ObjectStorageError, RuntimeError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         return StreamingResponse(
-            _stream_novel(detail, state.crawler_module.fetch_chapter),
+            stream,
             media_type="text/plain; charset=utf-8",
-            headers=_download_headers(to_simplified(detail.title)),
+            headers={
+                **_download_headers(cached["title_sc"]),
+                "X-Storybin-Download-Cache": "hit" if cache_hit else "miss",
+            },
         )
 
     @app.post("/admin/refresh")
@@ -362,6 +446,29 @@ def create_app(state: AppState | None = None) -> FastAPI:
             "status": state.index_status,
             "indexed_count": state.count,
             "index_complete": state.index_complete,
+        }
+
+    @app.post("/admin/cache")
+    async def cache_novel(
+        novel_id: str = Query(...),
+        x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+        state: AppState = Depends(get_state),
+    ):
+        _require_admin_token(x_admin_token, state)
+        novel = state.store.get_novel_by_id(novel_id)
+        if novel is None:
+            raise HTTPException(status_code=404, detail="Novel not found. Try searching first.")
+        try:
+            cached, cache_hit = _cache_or_get_novel(state, novel)
+        except (CrawlerHTTPError, CrawlerParseError, ObjectStorageError, RuntimeError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {
+            "status": "cached",
+            "novel_id": novel_id,
+            "cache_hit": cache_hit,
+            "cached_novel_count": state.cached_novel_count,
+            "chapter_count": cached["chapter_count"],
+            "title": cached["title_sc"],
         }
 
     return app

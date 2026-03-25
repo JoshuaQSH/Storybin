@@ -9,9 +9,28 @@ from app.index_store import IndexStore
 from app.main import AppState, create_app
 
 
+class MemoryObjectStorage:
+    def __init__(self):
+        self.objects = {}
+
+    def put_text(self, key: str, text: str):
+        self.objects[key] = text
+        return {
+            "object_key": key,
+            "content_bytes": len(text.encode("utf-8")),
+        }
+
+    def iter_text(self, key: str, *, chunk_size: int = 65536):
+        text = self.objects[key]
+        for index in range(0, len(text), chunk_size):
+            yield text[index : index + chunk_size]
+
+
 class DummyCrawler:
     def __init__(self):
         self.booklist_calls = []
+        self.detail_calls = []
+        self.chapter_calls = []
 
     def fetch_booklist_page(self, page: int, *, session=None, category_id=None):
         return self.fetch_booklist_page_result(page, session=session, category_id=category_id).novels
@@ -54,6 +73,7 @@ class DummyCrawler:
         )
 
     def fetch_novel_detail(self, novel_url: str, *, session=None):
+        self.detail_calls.append(novel_url)
         if novel_url.endswith("409089.html"):
             return NovelDetail(
                 novel_id="409089",
@@ -85,6 +105,7 @@ class DummyCrawler:
         )
 
     def fetch_chapter(self, chapter_url: str, *, session=None):
+        self.chapter_calls.append(chapter_url)
         title = "第一節" if chapter_url.endswith("/1.html") else "第二節"
         body = "歡迎來到臺灣。"
         return ChapterContent(title=title, body=body)
@@ -107,7 +128,7 @@ async def client_for_state(state: AppState):
             yield client
 
 
-def preload_store(store: IndexStore):
+def preload_store(store: IndexStore, crawler: DummyCrawler | None = None):
     store.upsert_novels(
         [
             NovelMeta(
@@ -126,7 +147,7 @@ def preload_store(store: IndexStore):
             ),
         ]
     )
-    crawler = DummyCrawler()
+    crawler = crawler or DummyCrawler()
     store.update_novel_detail(crawler.fetch_novel_detail("https://www.xbanxia.cc/books/409088.html"))
     store.update_novel_detail(crawler.fetch_novel_detail("https://www.xbanxia.cc/books/409089.html"))
 
@@ -182,6 +203,7 @@ async def test_download_novel():
         assert "《台湾恋曲》" in resp.text
         assert "欢迎来到台湾。" in resp.text
         assert "filename*=UTF-8''%E5%8F%B0%E6%B9%BE%E6%81%8B%E6%9B%B2.txt" in resp.headers["content-disposition"]
+        assert resp.headers["x-storybin-download-cache"] == "miss"
 
 
 @pytest.mark.asyncio
@@ -250,6 +272,8 @@ async def test_status_reports_cache_limits():
         assert payload["cache_max_novels"] == 20000
         assert payload["cache_prune_to_novels"] == 16000
         assert payload["cache_pruned_total"] == 0
+        assert payload["cached_novel_count"] == 0
+        assert payload["cache_storage_backend"] == "database"
         assert payload["cache_oldest_indexed_at"] is not None
         assert payload["cache_newest_indexed_at"] is not None
         assert payload["storage_backend"] == "sqlite"
@@ -291,3 +315,79 @@ async def test_status_reports_source_site_block_cleanly():
         assert payload["index_status"] == "blocked"
         assert payload["source_site_blocked"] is True
         assert "Source site blocked automated access" in payload["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_admin_cache_persists_novel_and_download_reuses_cached_text():
+    crawler = DummyCrawler()
+    store = IndexStore(":memory:")
+    preload_store(store, crawler=crawler)
+    baseline_detail_calls = len(crawler.detail_calls)
+    state = AppState(store=store, crawler_module=crawler, auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        cache_resp = await client.post(
+            "/admin/cache",
+            params={"novel_id": "409088"},
+            headers={"X-Admin-Token": "dev"},
+        )
+        assert cache_resp.status_code == 200
+        payload = cache_resp.json()
+        assert payload["cache_hit"] is False
+        assert payload["cached_novel_count"] == 1
+        assert payload["chapter_count"] == 2
+        assert len(crawler.detail_calls) == baseline_detail_calls + 1
+        assert len(crawler.chapter_calls) == 2
+
+        download_resp = await client.get("/download", params={"novel_id": "409088"})
+        assert download_resp.status_code == 200
+        assert download_resp.headers["x-storybin-download-cache"] == "hit"
+        assert "欢迎来到台湾。" in download_resp.text
+        assert len(crawler.detail_calls) == baseline_detail_calls + 1
+        assert len(crawler.chapter_calls) == 2
+
+        second_cache_resp = await client.post(
+            "/admin/cache",
+            params={"novel_id": "409088"},
+            headers={"X-Admin-Token": "dev"},
+        )
+        assert second_cache_resp.status_code == 200
+        assert second_cache_resp.json()["cache_hit"] is True
+
+
+@pytest.mark.asyncio
+async def test_download_uses_object_storage_when_r2_backend_is_enabled():
+    crawler = DummyCrawler()
+    store = IndexStore(":memory:")
+    preload_store(store, crawler=crawler)
+    object_storage = MemoryObjectStorage()
+    baseline_detail_calls = len(crawler.detail_calls)
+    state = AppState(
+        store=store,
+        crawler_module=crawler,
+        auto_start_index_build=False,
+        cache_storage_backend="r2",
+        object_storage=object_storage,
+    )
+
+    async with client_for_state(state) as client:
+        first = await client.get("/download", params={"novel_id": "409088"})
+        assert first.status_code == 200
+        assert first.headers["x-storybin-download-cache"] == "miss"
+        assert "欢迎来到台湾。" in first.text
+
+        cached = store.get_cached_novel("409088")
+        assert cached is not None
+        assert cached["storage_backend"] == "r2"
+        assert cached["content_txt"] == ""
+        assert cached["object_key"] in object_storage.objects
+        assert cached["content_bytes"] > 0
+        assert len(crawler.detail_calls) == baseline_detail_calls + 1
+        assert len(crawler.chapter_calls) == 2
+
+        second = await client.get("/download", params={"novel_id": "409088"})
+        assert second.status_code == 200
+        assert second.headers["x-storybin-download-cache"] == "hit"
+        assert "欢迎来到台湾。" in second.text
+        assert len(crawler.detail_calls) == baseline_detail_calls + 1
+        assert len(crawler.chapter_calls) == 2

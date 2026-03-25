@@ -77,6 +77,24 @@ class IndexStore:
                     """
                 )
             )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS novel_download_cache (
+                        novel_id          TEXT PRIMARY KEY,
+                        title_sc          TEXT NOT NULL,
+                        content_txt       TEXT NOT NULL DEFAULT '',
+                        storage_backend   TEXT NOT NULL DEFAULT 'database',
+                        object_key        TEXT,
+                        content_bytes     INTEGER,
+                        content_sha256    TEXT,
+                        chapter_count     INTEGER NOT NULL DEFAULT 0,
+                        cached_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_accessed_at  TIMESTAMP
+                    )
+                    """
+                )
+            )
         self._ensure_column("author_tc", "TEXT")
         self._ensure_column("author_sc", "TEXT")
         self._ensure_column("category_tc", "TEXT")
@@ -84,6 +102,10 @@ class IndexStore:
         self._ensure_column("latest_update", "TEXT")
         self._ensure_column("detail_checked_at", "TIMESTAMP")
         self._ensure_column("last_accessed_at", "TIMESTAMP")
+        self._ensure_column("storage_backend", "TEXT", table_name="novel_download_cache")
+        self._ensure_column("object_key", "TEXT", table_name="novel_download_cache")
+        self._ensure_column("content_bytes", "INTEGER", table_name="novel_download_cache")
+        self._ensure_column("content_sha256", "TEXT", table_name="novel_download_cache")
 
     def upsert_novels(self, novels: list[NovelMeta]):
         rows = [
@@ -257,6 +279,105 @@ class IndexStore:
             return None
         return dict(row)
 
+    def upsert_cached_novel(
+        self,
+        *,
+        novel_id: str,
+        title_sc: str,
+        content_txt: str,
+        chapter_count: int,
+        storage_backend: str = "database",
+        object_key: str | None = None,
+        content_bytes: int | None = None,
+        content_sha256: str | None = None,
+    ):
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO novel_download_cache (
+                        novel_id,
+                        title_sc,
+                        content_txt,
+                        storage_backend,
+                        object_key,
+                        content_bytes,
+                        content_sha256,
+                        chapter_count,
+                        last_accessed_at
+                    )
+                    VALUES (
+                        :novel_id,
+                        :title_sc,
+                        :content_txt,
+                        :storage_backend,
+                        :object_key,
+                        :content_bytes,
+                        :content_sha256,
+                        :chapter_count,
+                        CURRENT_TIMESTAMP
+                    )
+                    ON CONFLICT (novel_id) DO UPDATE SET
+                        title_sc = excluded.title_sc,
+                        content_txt = excluded.content_txt,
+                        storage_backend = excluded.storage_backend,
+                        object_key = excluded.object_key,
+                        content_bytes = excluded.content_bytes,
+                        content_sha256 = excluded.content_sha256,
+                        chapter_count = excluded.chapter_count,
+                        cached_at = CURRENT_TIMESTAMP,
+                        last_accessed_at = CURRENT_TIMESTAMP
+                    """
+                ),
+                {
+                    "novel_id": novel_id,
+                    "title_sc": title_sc,
+                    "content_txt": content_txt,
+                    "storage_backend": storage_backend,
+                    "object_key": object_key,
+                    "content_bytes": content_bytes,
+                    "content_sha256": content_sha256,
+                    "chapter_count": chapter_count,
+                },
+            )
+
+    def get_cached_novel(self, novel_id: str) -> dict[str, Any] | None:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT novel_id, title_sc, content_txt, storage_backend, object_key,
+                           content_bytes, content_sha256, chapter_count, cached_at, last_accessed_at
+                    FROM novel_download_cache
+                    WHERE novel_id = :novel_id
+                    """
+                ),
+                {"novel_id": novel_id},
+            ).mappings().first()
+        if row is None:
+            return None
+        return dict(row)
+
+    def touch_cached_novel(self, novel_id: str):
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE novel_download_cache
+                    SET last_accessed_at = CURRENT_TIMESTAMP
+                    WHERE novel_id = :novel_id
+                    """
+                ),
+                {"novel_id": novel_id},
+            )
+
+    def cached_novel_count(self) -> int:
+        with self.engine.begin() as conn:
+            count = conn.execute(
+                text("SELECT COUNT(*) AS count FROM novel_download_cache")
+            ).scalar_one()
+        return int(count)
+
     def count(self) -> int:
         with self.engine.begin() as conn:
             count = conn.execute(text("SELECT COUNT(*) AS count FROM novels")).scalar_one()
@@ -325,21 +446,25 @@ class IndexStore:
                 "DELETE FROM novels WHERE novel_id IN :novel_ids"
             ).bindparams(bindparam("novel_ids", expanding=True))
             conn.execute(delete_stmt, {"novel_ids": novel_ids})
+            delete_cache_stmt = text(
+                "DELETE FROM novel_download_cache WHERE novel_id IN :novel_ids"
+            ).bindparams(bindparam("novel_ids", expanding=True))
+            conn.execute(delete_cache_stmt, {"novel_ids": novel_ids})
         return len(novel_ids)
 
     def close(self):
         self.engine.dispose()
 
-    def _ensure_column(self, column_name: str, column_type: str):
-        if column_name in self._existing_columns():
+    def _ensure_column(self, column_name: str, column_type: str, *, table_name: str = "novels"):
+        if column_name in self._existing_columns(table_name=table_name):
             return
         with self.engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE novels ADD COLUMN {column_name} {column_type}"))
+            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"))
 
-    def _existing_columns(self) -> set[str]:
+    def _existing_columns(self, *, table_name: str = "novels") -> set[str]:
         with self.engine.begin() as conn:
             if self.storage_backend == "sqlite":
-                rows = conn.execute(text("PRAGMA table_info(novels)")).mappings().all()
+                rows = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings().all()
                 return {row["name"] for row in rows}
             rows = conn.execute(
                 text(
@@ -347,8 +472,9 @@ class IndexStore:
                     SELECT column_name
                     FROM information_schema.columns
                     WHERE table_schema = current_schema()
-                      AND table_name = 'novels'
+                      AND table_name = :table_name
                     """
-                )
+                ),
+                {"table_name": table_name},
             ).mappings().all()
         return {row["column_name"] for row in rows}

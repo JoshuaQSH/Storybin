@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 import re
 import time
@@ -88,7 +89,12 @@ def fetch_booklist_page_result(
     )
 
     try:
-        soup = _fetch_soup(url, session=session, apply_rate_limit=own_session)
+        soup = _fetch_soup(
+            url,
+            session=session,
+            apply_rate_limit=own_session,
+            allow_fallback=own_session,
+        )
         return _parse_booklist_soup(soup)
     finally:
         if own_session:
@@ -104,7 +110,12 @@ def fetch_novel_detail(
     session = session or requests.Session()
 
     try:
-        soup = _fetch_soup(novel_url, session=session, apply_rate_limit=own_session)
+        soup = _fetch_soup(
+            novel_url,
+            session=session,
+            apply_rate_limit=own_session,
+            allow_fallback=own_session,
+        )
         return _parse_novel_detail_soup(soup, novel_url)
     finally:
         if own_session:
@@ -120,7 +131,12 @@ def fetch_chapter(
     session = session or requests.Session()
 
     try:
-        soup = _fetch_soup(chapter_url, session=session, apply_rate_limit=own_session)
+        soup = _fetch_soup(
+            chapter_url,
+            session=session,
+            apply_rate_limit=own_session,
+            allow_fallback=own_session,
+        )
         title = _required_text(soup, config.CHAPTER_TITLE_SELECTOR, "chapter title")
         body_node = _select_one(soup, config.CHAPTER_BODY_SELECTOR, "chapter body")
         body = _clean_chapter_body(body_node, title)
@@ -155,8 +171,14 @@ def _fetch_soup(
     *,
     session: requests.Session,
     apply_rate_limit: bool,
+    allow_fallback: bool,
 ) -> BeautifulSoup:
-    html = _request_text(url, session=session, apply_rate_limit=apply_rate_limit)
+    html = _request_text(
+        url,
+        session=session,
+        apply_rate_limit=apply_rate_limit,
+        allow_fallback=allow_fallback,
+    )
     return BeautifulSoup(html, "lxml")
 
 
@@ -210,13 +232,89 @@ def _request_text(
     *,
     session: requests.Session,
     apply_rate_limit: bool,
+    allow_fallback: bool,
 ) -> str:
-    response = _request_response(
-        url,
-        session=session,
-        apply_rate_limit=apply_rate_limit,
-    )
-    return response.text
+    backends = config.FETCH_BACKENDS if allow_fallback else ("requests",)
+    last_error: Exception | None = None
+
+    for backend in backends:
+        try:
+            if backend == "requests":
+                response = _request_response(
+                    url,
+                    session=session,
+                    apply_rate_limit=apply_rate_limit,
+                )
+                return response.text
+            if backend == "playwright":
+                return _request_text_via_playwright(
+                    url,
+                    apply_rate_limit=apply_rate_limit,
+                )
+            last_error = CrawlerHTTPError(f"Unsupported fetch backend: {backend}")
+        except (CrawlerHTTPError, SourceSiteBlockedError) as exc:
+            last_error = exc
+            if not allow_fallback:
+                raise
+
+    if last_error is None:
+        raise CrawlerHTTPError(f"Failed to fetch {url}: no fetch backends configured")
+    raise CrawlerHTTPError(f"Failed to fetch {url}: {last_error}") from last_error
+
+
+def _request_text_via_playwright(
+    url: str,
+    *,
+    apply_rate_limit: bool,
+) -> str:
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - depends on runtime installation.
+        raise CrawlerHTTPError(
+            "Playwright fallback is configured but playwright is not installed."
+        ) from exc
+
+    if apply_rate_limit and config.RATE_LIMIT_SECONDS > 0:
+        time.sleep(config.RATE_LIMIT_SECONDS)
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=config.HEADERS["User-Agent"],
+                locale="zh-TW",
+                extra_http_headers={
+                    "Accept": config.HEADERS["Accept"],
+                    "Accept-Language": config.HEADERS["Accept-Language"],
+                    "Referer": config.HEADERS["Referer"],
+                },
+            )
+            page = context.new_page()
+            response = page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000),
+            )
+            with suppress(PlaywrightError):
+                page.wait_for_load_state(
+                    "networkidle",
+                    timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000),
+                )
+            html = page.content()
+            context.close()
+            browser.close()
+    except PlaywrightError as exc:  # pragma: no cover - exercised in live probing only.
+        raise CrawlerHTTPError(f"Playwright failed to fetch {url}: {exc}") from exc
+
+    status = response.status if response is not None else 200
+    if status >= 400:
+        if "Just a moment..." in html or "cloudflare" in html.lower():
+            raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+        raise CrawlerHTTPError(f"Playwright failed to fetch {url}: HTTP {status}")
+    if "Just a moment..." in html or "cloudflare" in html.lower():
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {url}")
+    return html
 
 
 def _required_text(node: BeautifulSoup | Tag, selector: str, label: str) -> str:
