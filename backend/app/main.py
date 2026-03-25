@@ -13,6 +13,7 @@ from urllib.parse import quote
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from app import config, crawler
 from app.converter import to_simplified
@@ -28,6 +29,17 @@ from app.search import SearchDocument, fuzzy_search
 from app.storage import ObjectStorageError, build_object_storage_from_config
 
 logger = logging.getLogger(__name__)
+
+
+class ImportedCachedNovel(BaseModel):
+    novel_id: str
+    title: str
+    author: str
+    category: str
+    url: str
+    content_txt: str
+    chapter_count: int
+    latest_update: str | None = None
 
 
 @dataclass
@@ -476,6 +488,46 @@ def create_app(state: AppState | None = None) -> FastAPI:
             "cached_novel_count": state.cached_novel_count,
             "chapter_count": cached["chapter_count"],
             "title": cached["title_sc"],
+        }
+
+    @app.post("/admin/import-cached")
+    async def import_cached_novel(
+        payload: ImportedCachedNovel,
+        x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+        state: AppState = Depends(get_state),
+    ):
+        _require_admin_token(x_admin_token, state)
+        state.store.upsert_novels(
+            [
+                NovelMeta(
+                    novel_id=payload.novel_id,
+                    title=payload.title,
+                    author=payload.author,
+                    category=payload.category,
+                    url=payload.url,
+                    latest_update=payload.latest_update,
+                )
+            ]
+        )
+        _persist_cached_novel(
+            state,
+            payload.novel_id,
+            {
+                "title_sc": to_simplified(payload.title),
+                "content_txt": to_simplified(payload.content_txt),
+                "chapter_count": payload.chapter_count,
+            },
+        )
+        state.refresh_search_documents()
+        cached = state.store.get_cached_novel(payload.novel_id)
+        if cached is None:  # pragma: no cover - defensive guard
+            raise HTTPException(status_code=500, detail="Imported cache was not persisted.")
+        return {
+            "status": "imported",
+            "novel_id": payload.novel_id,
+            "title": cached["title_sc"],
+            "chapter_count": cached["chapter_count"],
+            "cache_storage_backend": cached["storage_backend"],
         }
 
     return app

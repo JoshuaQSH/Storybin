@@ -426,3 +426,38 @@ async def test_search_refreshes_documents_after_external_store_update():
         payload = resp.json()
         assert payload["results"]
         assert payload["results"][0]["novel_id"] == "500001"
+
+
+@pytest.mark.asyncio
+async def test_admin_import_cached_novel_makes_search_and_download_available():
+    store = IndexStore(":memory:")
+    state = AppState(store=store, crawler_module=BlockedCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        import_resp = await client.post(
+            "/admin/import-cached",
+            headers={"X-Admin-Token": "dev"},
+            json={
+                "novel_id": "600001",
+                "title": "臺灣導入小說",
+                "author": "作者戊",
+                "category": "測試分類",
+                "url": "https://www.xbanxia.cc/books/600001.html",
+                "content_txt": "《臺灣導入小說》\n作者：作者戊\n\n第1章 測試\n\n歡迎來到臺灣。\n",
+                "chapter_count": 1,
+                "latest_update": "2026-03-25",
+            },
+        )
+        assert import_resp.status_code == 200
+        assert import_resp.json()["status"] == "imported"
+
+        search_resp = await client.get("/search", params={"q": "台湾导入小说"})
+        assert search_resp.status_code == 200
+        search_payload = search_resp.json()
+        assert search_payload["results"]
+        assert search_payload["results"][0]["novel_id"] == "600001"
+
+        download_resp = await client.get("/download", params={"novel_id": "600001"})
+        assert download_resp.status_code == 200
+        assert download_resp.headers["x-storybin-download-cache"] == "hit"
+        assert "欢迎来到台湾。" in download_resp.text
