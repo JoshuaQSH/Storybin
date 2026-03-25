@@ -72,6 +72,58 @@ def test_fetch_backup_chapter_extracts_clean_body():
     assert chapter.body == "欢迎来到台湾。\n这里已经是简体版本。"
 
 
+def test_search_backup_sources_falls_back_to_jina_markdown():
+    blocked = "<title>Just a moment...</title>"
+    markdown = (FIXTURES / "banx_jina_search_page.md").read_text(encoding="utf-8")
+    session = make_session_by_url(
+        {
+            "https://www.banx.la/modules/article/search.php?searchkey=%E5%8F%B0%E6%B9%BE&searchtype=all&page=1": blocked,
+            "https://r.jina.ai/http://www.banx.la/modules/article/search.php?searchkey=%E5%8F%B0%E6%B9%BE&searchtype=all&page=1": markdown,
+        }
+    )
+
+    results = search_backup_sources("台湾", session=session)
+
+    assert [item.novel_id for item in results] == ["banx-55183", "banx-62830"]
+    assert results[0].title == "台湾甜心"
+
+
+def test_fetch_backup_novel_falls_back_to_jina_markdown():
+    blocked = "<title>Just a moment...</title>"
+    markdown = (FIXTURES / "banx_jina_novel_page.md").read_text(encoding="utf-8")
+    session = make_session_by_url(
+        {
+            "https://www.banx.la/book/55183": blocked,
+            "https://r.jina.ai/http://www.banx.la/book/55183": markdown,
+        }
+    )
+
+    detail = fetch_backup_novel("banx", "banx-55183", session=session)
+
+    assert detail.title == "台湾甜心"
+    assert detail.author == "贝佳"
+    assert detail.chapter_urls == [
+        "https://www.banx.la/chapter/55183/12290047",
+        "https://www.banx.la/chapter/55183/12290054",
+    ]
+
+
+def test_fetch_backup_chapter_falls_back_to_jina_markdown():
+    blocked = "<title>Just a moment...</title>"
+    markdown = (FIXTURES / "banx_jina_chapter_page.md").read_text(encoding="utf-8")
+    session = make_session_by_url(
+        {
+            "https://www.banx.la/chapter/55183/12290047": blocked,
+            "https://r.jina.ai/http://www.banx.la/chapter/55183/12290047": markdown,
+        }
+    )
+
+    chapter = fetch_backup_chapter("banx", "https://www.banx.la/chapter/55183/12290047", session=session)
+
+    assert chapter.title == "第一章"
+    assert chapter.body.startswith("人声吵杂，人群围绕着某一物")
+
+
 def test_manual_source_links_include_backup_sites():
     links = manual_source_links("台湾恋曲")
 
