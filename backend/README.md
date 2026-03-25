@@ -118,7 +118,7 @@ crawler at an HTTP/HTTPS proxy by setting `CRAWLER_HTTP_PROXY` and
 ## Upload Conversion
 
 The frontend now supports uploading a Traditional Chinese `.txt` novel exported from
-Tampermonkey or another browser tool. The backend converts it to Simplified Chinese,
+your own TXT export or another browser tool. The backend converts it to Simplified Chinese,
 stores the converted text, and exposes two download formats:
 
 - Simplified Chinese `.txt`

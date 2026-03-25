@@ -6,6 +6,7 @@ from zipfile import ZipFile
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.backup_sources import BackupNovelDetail, BackupSearchResult, ManualSourceLink
 from app.crawler import BooklistPage, ChapterContent, NovelDetail, NovelMeta, SourceSiteBlockedError
 from app.index_store import IndexStore
 from app.main import AppState, create_app
@@ -119,6 +120,113 @@ class BlockedCrawler(DummyCrawler):
 
     def fetch_booklist_page_result(self, page: int, *, session=None, category_id=None):
         raise SourceSiteBlockedError("Source site blocked automated access for https://www.xbanxia.cc/list/1_1.html")
+
+
+class DetailBlockedCrawler(DummyCrawler):
+    def fetch_novel_detail(self, novel_url: str, *, session=None):
+        raise SourceSiteBlockedError(f"Source site blocked automated access for {novel_url}")
+
+
+class DummyBackupSources:
+    def __init__(self):
+        self.search_calls = []
+        self.detail_calls = []
+        self.chapter_calls = []
+
+    def search_backup_sources(self, query: str, *, limit: int = 10, session=None):
+        self.search_calls.append((query, limit))
+        normalized = query.strip()
+        if not normalized:
+            return []
+        return [
+            BackupSearchResult(
+                source="banx",
+                source_name="半夏简体",
+                novel_id="banx-770001",
+                title="台湾恋曲",
+                author="作者甲",
+                category="半夏简体",
+                url="https://www.banx.la/book/770001",
+                is_simplified=True,
+            ),
+            BackupSearchResult(
+                source="banx",
+                source_name="半夏简体",
+                novel_id="banx-770002",
+                title="台湾娱乐1971",
+                author="作者乙",
+                category="半夏简体",
+                url="https://www.banx.la/book/770002",
+                is_simplified=True,
+            ),
+        ][:limit]
+
+    def fetch_backup_novel(self, source: str, novel_id: str, *, session=None):
+        self.detail_calls.append((source, novel_id))
+        if novel_id == "banx-770002":
+            return BackupNovelDetail(
+                source="banx",
+                source_name="半夏简体",
+                novel_id=novel_id,
+                title="台湾娱乐1971",
+                author="作者乙",
+                category="半夏简体",
+                url="https://www.banx.la/book/770002",
+                chapter_urls=["https://www.banx.la/chapter/770002/1"],
+                latest_update="2026-03-25",
+                is_simplified=True,
+            )
+        return BackupNovelDetail(
+            source="banx",
+            source_name="半夏简体",
+            novel_id=novel_id,
+            title="台湾恋曲",
+            author="作者甲",
+            category="半夏简体",
+            url="https://www.banx.la/book/770001",
+            chapter_urls=[
+                "https://www.banx.la/chapter/770001/1",
+                "https://www.banx.la/chapter/770001/2",
+            ],
+            latest_update="2026-03-25",
+            is_simplified=True,
+        )
+
+    def fetch_backup_chapter(self, source: str, chapter_url: str, *, session=None):
+        self.chapter_calls.append((source, chapter_url))
+        title = "第一章" if chapter_url.endswith("/1") else "第二章"
+        return ChapterContent(title=title, body="欢迎来到台湾。这里已经是简体站点。")
+
+    def manual_source_links(self, query: str):
+        return [
+            ManualSourceLink(label="半夏简体", url=f"https://www.banx.la/modules/article/search.php?searchkey={query}"),
+            ManualSourceLink(label="言情小说网", url="https://love.kanunu8.com/"),
+            ManualSourceLink(label="努努书坊", url="https://www.kanunu8.com/"),
+        ]
+
+    def identify_source(self, url: str | None):
+        if not url:
+            return None
+        if "xbanxia.cc" in url:
+            return "xbanxia"
+        if "banx.la" in url:
+            return "banx"
+        if "love.kanunu8.com" in url:
+            return "love_kanunu8"
+        if "kanunu8.com" in url:
+            return "kanunu8"
+        return None
+
+    def source_label(self, source: str | None):
+        return {
+            "banx": "半夏简体",
+            "xbanxia": "半夏原站",
+            "love_kanunu8": "言情小说网",
+            "kanunu8": "努努书坊",
+        }.get(source or "", "未知来源")
+
+    def source_is_simplified(self, source: str | None):
+        return source == "banx"
 
 
 @asynccontextmanager
@@ -318,6 +426,33 @@ async def test_search_returns_cached_results_when_source_is_blocked():
 
 
 @pytest.mark.asyncio
+async def test_search_includes_backup_source_results_and_manual_links():
+    state = AppState(
+        store=IndexStore(":memory:"),
+        crawler_module=BlockedCrawler(),
+        backup_sources_module=DummyBackupSources(),
+        auto_start_index_build=False,
+    )
+    state.source_site_blocked = True
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/search", params={"q": "台湾恋曲"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["results"]
+        assert payload["results"][0]["novel_id"] == "banx-770001"
+        assert payload["results"][0]["result_kind"] == "external"
+        assert payload["results"][0]["source"] == "banx"
+        assert payload["results"][0]["txt_download_url"].endswith(
+            "/download/external?source=banx&novel_id=banx-770001"
+        )
+        assert payload["results"][0]["epub_download_url"].endswith(
+            "/download/external/epub?source=banx&novel_id=banx-770001"
+        )
+        assert payload["manual_source_links"][0]["label"] == "半夏简体"
+
+
+@pytest.mark.asyncio
 async def test_status_reports_source_site_block_cleanly():
     state = AppState(
         store=IndexStore(":memory:"),
@@ -411,6 +546,59 @@ async def test_download_uses_object_storage_when_r2_backend_is_enabled():
         assert "欢迎来到台湾。" in second.text
         assert len(crawler.detail_calls) == baseline_detail_calls + 1
         assert len(crawler.chapter_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_download_external_txt_and_epub_use_backup_source_and_cache():
+    backup = DummyBackupSources()
+    state = AppState(
+        store=IndexStore(":memory:"),
+        crawler_module=BlockedCrawler(),
+        backup_sources_module=backup,
+        auto_start_index_build=False,
+    )
+
+    async with client_for_state(state) as client:
+        txt_resp = await client.get("/download/external", params={"source": "banx", "novel_id": "banx-770001"})
+        assert txt_resp.status_code == 200
+        assert txt_resp.headers["x-storybin-download-cache"] == "miss"
+        assert "欢迎来到台湾。这里已经是简体站点。" in txt_resp.text
+
+        second_txt = await client.get("/download/external", params={"source": "banx", "novel_id": "banx-770001"})
+        assert second_txt.status_code == 200
+        assert second_txt.headers["x-storybin-download-cache"] == "hit"
+
+        epub_resp = await client.get("/download/external/epub", params={"source": "banx", "novel_id": "banx-770001"})
+        assert epub_resp.status_code == 200
+        with ZipFile(BytesIO(epub_resp.content)) as archive:
+            chapter = archive.read("OEBPS/text/chapter-001.xhtml").decode("utf-8")
+            assert "欢迎来到台湾。这里已经是简体站点。" in chapter
+
+        assert backup.detail_calls == [("banx", "banx-770001")]
+        assert len(backup.chapter_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_download_falls_back_to_backup_source_when_origin_is_blocked():
+    store = IndexStore(":memory:")
+    preload_store(store)
+    state = AppState(
+        store=store,
+        crawler_module=DetailBlockedCrawler(),
+        backup_sources_module=DummyBackupSources(),
+        auto_start_index_build=False,
+    )
+    state.source_site_blocked = True
+
+    async with client_for_state(state) as client:
+        resp = await client.get("/download", params={"novel_id": "409088"})
+        assert resp.status_code == 200
+        assert resp.headers["x-storybin-download-cache"] == "miss"
+        assert "欢迎来到台湾。这里已经是简体站点。" in resp.text
+
+        second = await client.get("/download", params={"novel_id": "409088"})
+        assert second.status_code == 200
+        assert second.headers["x-storybin-download-cache"] == "hit"
 
 
 @pytest.mark.asyncio

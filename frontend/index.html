@@ -352,8 +352,8 @@
         <div class="eyebrow">Storybin</div>
         <h1>Storybin</h1>
         <p class="subtitle">
-          先搜索已经缓存好的小说；如果没找到，就把你在原站浏览器里导出的全文导入共享书架。
-          导入后，所有访问者都可以直接下载简体中文 `.txt` 和 `.epub`。
+          先搜索已经缓存好的小说；如果原站暂时不可用，Storybin 会自动去备用网址查找并生成
+          简体中文 `.txt` / `.epub`。如果你已经拿到了自己的 TXT，也可以直接上传并转换。
         </p>
 
         <div class="controls">
@@ -379,34 +379,10 @@
       </section>
 
       <section class="shelf">
-        <h2 class="section-title">导入共享书架</h2>
-        <p class="section-copy">
-          不再做整站全量抓取，而是按需把原站小说导入共享缓存。你可以先在原站用 Tampermonkey 导出全文，
-          然后把 `.txt` 连同原书链接一起提交到 Storybin。导入成功后，这本书会立刻进入搜索结果。
-          <a class="assist-link" href="./storybin-import.user.js" target="_blank" rel="noreferrer">打开 Tampermonkey 导入脚本</a>
-        </p>
-        <div class="controls">
-          <input id="cacheFileInput" class="file-input" type="file" accept=".txt,text/plain" />
-          <button id="cacheButton" class="search-button" type="button">导入共享书架</button>
-        </div>
-        <div class="controls">
-          <input
-            id="cacheUrlInput"
-            class="text-input"
-            type="url"
-            placeholder="可选：粘贴原站小说链接，例如 https://www.xbanxia.cc/books/410113.html"
-          />
-          <div class="note-chip">共享缓存会生成全站可搜索的 TXT / EPUB</div>
-        </div>
-        <div id="cacheFeedback" class="feedback"></div>
-        <section id="cacheResults" class="results" aria-live="polite"></section>
-      </section>
-
-      <section class="shelf">
         <h2 class="section-title">上传自带 TXT</h2>
         <p class="section-copy">
-          如果你只想自己临时转换文件、不进入共享搜索库，也可以在这里上传繁体中文 `.txt`，
-          立即下载简体中文 `.txt` 或 `.epub`。
+          如果你已经从浏览器脚本、网盘或别处拿到了 TXT，可以直接在这里上传。
+          繁体内容会自动转成简体；如果原文已经是简体，就会直接生成可下载的 `.txt` 和 `.epub`。
         </p>
         <div class="controls">
           <input id="uploadInput" class="file-input" type="file" accept=".txt,text/plain" />
@@ -424,7 +400,7 @@
 
       <section class="shelf">
         <h2 class="section-title">搜索结果</h2>
-        <p class="section-copy">支持关键词、联想式字符匹配和模糊匹配。</p>
+        <p class="section-copy">支持关键词、联想式字符匹配和模糊匹配；原站不可达时会补充备用网址结果。</p>
         <section id="results" class="results" aria-live="polite"></section>
       </section>
     </main>
@@ -437,11 +413,6 @@
 
       const searchInput = document.getElementById("searchInput");
       const searchButton = document.getElementById("searchButton");
-      const cacheFileInput = document.getElementById("cacheFileInput");
-      const cacheButton = document.getElementById("cacheButton");
-      const cacheUrlInput = document.getElementById("cacheUrlInput");
-      const cacheFeedback = document.getElementById("cacheFeedback");
-      const cacheResults = document.getElementById("cacheResults");
       const uploadInput = document.getElementById("uploadInput");
       const uploadButton = document.getElementById("uploadButton");
       const uploadFeedback = document.getElementById("uploadFeedback");
@@ -468,9 +439,154 @@
         uploadFeedback.className = kind ? `feedback ${kind}` : "feedback";
       }
 
-      function setCacheFeedback(message, kind = "") {
-        cacheFeedback.textContent = message;
-        cacheFeedback.className = kind ? `feedback ${kind}` : "feedback";
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function resolveUrl(url) {
+        if (!url) {
+          return "#";
+        }
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+          return url;
+        }
+        return `${BACKEND_URL}${url.startsWith("/") ? "" : "/"}${url}`;
+      }
+
+      function renderManualLinks(links) {
+        if (!links.length) {
+          return "";
+        }
+        return `
+          <div class="pill-row" style="justify-content:center; margin-top:16px;">
+            ${links
+              .map(
+                (link) => `
+                  <a class="assist-link" href="${escapeHtml(link.url)}" target="_blank" rel="noreferrer">
+                    ${escapeHtml(link.label)}
+                  </a>
+                `
+              )
+              .join("")}
+          </div>
+        `;
+      }
+
+      function renderEmptyState(message, manualLinks = []) {
+        return `
+          <div class="empty-state">
+            ${escapeHtml(message)}
+            ${renderManualLinks(manualLinks)}
+          </div>
+        `;
+      }
+
+      function actionLabel(item, extension) {
+        if (item.result_kind === "external" && !item.cache_available) {
+          return `在线获取 ${extension}`;
+        }
+        return `下载 ${extension}`;
+      }
+
+      function renderNovelCard(item, index, { showScore = false, showUpdate = false } = {}) {
+        const availability = item.cache_available
+          ? "已缓存"
+          : item.result_kind === "external"
+            ? "在线获取"
+            : "按需抓取";
+        const sourceName = item.source_name || "未知来源";
+        const textProfile = item.is_simplified_source ? "简体源" : "需转简体";
+
+        return `
+          <article class="card" style="animation-delay:${index * 45}ms">
+            <div>
+              <h2>${escapeHtml(item.title)}</h2>
+              <p>${item.title_tc ? `原始标题：${escapeHtml(item.title_tc)}` : "原始标题：无"}</p>
+              <div class="pill-row">
+                <span class="pill">作者：${escapeHtml(item.author || "未知")}</span>
+                <span class="pill">分类：${escapeHtml(item.category || "未知")}</span>
+                <span class="pill">来源：${escapeHtml(sourceName)}</span>
+                <span class="pill">状态：${escapeHtml(availability)}</span>
+                <span class="pill">文本：${escapeHtml(textProfile)}</span>
+                ${showScore ? `<span class="pill">匹配分：${Math.round(item.score || 0)}</span>` : ""}
+                ${showScore ? `<span class="pill">命中方式：${escapeHtml(item.match_type || "fuzzy")}</span>` : ""}
+                ${showUpdate ? `<span class="pill">最近更新：${escapeHtml(item.latest_update || "待补充")}</span>` : ""}
+              </div>
+            </div>
+            <div class="action-row">
+              <a
+                class="download-link"
+                href="${escapeHtml(resolveUrl(item.txt_download_url))}"
+                target="_blank"
+                rel="noreferrer"
+              >
+                ${actionLabel(item, ".txt")}
+              </a>
+              <a
+                class="download-link alt"
+                href="${escapeHtml(resolveUrl(item.epub_download_url))}"
+                target="_blank"
+                rel="noreferrer"
+              >
+                ${actionLabel(item, ".epub")}
+              </a>
+            </div>
+          </article>
+        `;
+      }
+
+      function renderResults(items, manualLinks = []) {
+        if (!items.length) {
+          results.innerHTML = renderEmptyState(
+            "还没有可展示的结果。试试更短的关键词，或者去备用网址继续查找。",
+            manualLinks
+          );
+          return;
+        }
+
+        results.innerHTML = items.map((item, index) => renderNovelCard(item, index, { showScore: true })).join("");
+      }
+
+      function renderFeatured(items) {
+        if (!items.length) {
+          featuredResults.innerHTML = renderEmptyState(
+            "最新主推列表还在准备中。随着索引推进，这里会自动出现最近更新的小说。"
+          );
+          return;
+        }
+
+        featuredResults.innerHTML = items
+          .map((item, index) => renderNovelCard(item, index, { showUpdate: true }))
+          .join("");
+      }
+
+      function renderUploadResult(payload) {
+        uploadResults.innerHTML = `
+          <article class="card">
+            <div>
+              <h2>${escapeHtml(payload.title)}</h2>
+              <p>${payload.title_tc ? `原始标题：${escapeHtml(payload.title_tc)}` : "原始标题：未识别"}</p>
+              <div class="pill-row">
+                <span class="pill">作者：${escapeHtml(payload.author || "未知")}</span>
+                <span class="pill">原文件：${escapeHtml(payload.source_filename || "未知")}</span>
+                <span class="pill">简体文本：${escapeHtml(payload.content_bytes || 0)} 字节</span>
+              </div>
+              <div class="action-row">
+                <a class="download-link" href="${escapeHtml(resolveUrl(payload.txt_download_url))}" target="_blank" rel="noreferrer">
+                  下载简体 .txt
+                </a>
+                <a class="download-link alt" href="${escapeHtml(resolveUrl(payload.epub_download_url))}" target="_blank" rel="noreferrer">
+                  下载简体 .epub
+                </a>
+              </div>
+            </div>
+          </article>
+        `;
       }
 
       function setStatus(status, count, lastError, pagesCrawled = null, pagesTotal = null) {
@@ -509,152 +625,6 @@
         }
       }
 
-      function renderResults(items) {
-        if (!items.length) {
-          results.innerHTML = '<div class="empty-state">还没有可展示的结果。试试别的关键词，或等待索引建立完成。</div>';
-          return;
-        }
-
-        results.innerHTML = items
-          .map(
-            (item, index) => `
-              <article class="card" style="animation-delay:${index * 45}ms">
-                <div>
-                  <h2>${escapeHtml(item.title)}</h2>
-                  <p>${item.title_tc ? `原始标题：${escapeHtml(item.title_tc)}` : "原始标题：无"}</p>
-                  <div class="pill-row">
-                    <span class="pill">作者：${escapeHtml(item.author || "未知")}</span>
-                    <span class="pill">分类：${escapeHtml(item.category || "未知")}</span>
-                    <span class="pill">匹配分：${Math.round(item.score)}</span>
-                    <span class="pill">命中方式：${escapeHtml(item.match_type || "fuzzy")}</span>
-                  </div>
-                </div>
-                <div class="action-row">
-                  <a
-                    class="download-link"
-                    href="${BACKEND_URL}/download?novel_id=${encodeURIComponent(item.novel_id)}"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    下载 .txt
-                  </a>
-                  <a
-                    class="download-link alt"
-                    href="${BACKEND_URL}/download/epub?novel_id=${encodeURIComponent(item.novel_id)}"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    下载 .epub
-                  </a>
-                </div>
-              </article>
-            `
-          )
-          .join("");
-      }
-
-      function renderFeatured(items) {
-        if (!items.length) {
-          featuredResults.innerHTML =
-            '<div class="empty-state">最新主推列表还在准备中。随着索引推进，这里会自动出现最近更新的小说。</div>';
-          return;
-        }
-
-        featuredResults.innerHTML = items
-          .map(
-            (item, index) => `
-              <article class="card" style="animation-delay:${index * 35}ms">
-                <div>
-                  <h2>${escapeHtml(item.title)}</h2>
-                  <p>${item.title_tc ? `原始标题：${escapeHtml(item.title_tc)}` : "原始标题：无"}</p>
-                  <div class="pill-row">
-                    <span class="pill">作者：${escapeHtml(item.author || "未知")}</span>
-                    <span class="pill">分类：${escapeHtml(item.category || "未知")}</span>
-                    <span class="pill">最近更新：${escapeHtml(item.latest_update || "待补充")}</span>
-                  </div>
-                </div>
-                <div class="action-row">
-                  <a
-                    class="download-link"
-                    href="${BACKEND_URL}/download?novel_id=${encodeURIComponent(item.novel_id)}"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    下载 .txt
-                  </a>
-                  <a
-                    class="download-link alt"
-                    href="${BACKEND_URL}/download/epub?novel_id=${encodeURIComponent(item.novel_id)}"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    下载 .epub
-                  </a>
-                </div>
-              </article>
-            `
-          )
-          .join("");
-      }
-
-      function renderCacheResult(payload) {
-        cacheResults.innerHTML = `
-          <article class="card">
-            <div>
-              <h2>${escapeHtml(payload.title)}</h2>
-              <p>${payload.title_tc ? `原始标题：${escapeHtml(payload.title_tc)}` : "原始标题：未识别"}</p>
-              <div class="pill-row">
-                <span class="pill">作者：${escapeHtml(payload.author || "未知")}</span>
-                <span class="pill">分类：${escapeHtml(payload.category || "用户导入")}</span>
-                <span class="pill">章节数：${escapeHtml(payload.chapter_count || 1)}</span>
-                <span class="pill">编号：${escapeHtml(payload.novel_id)}</span>
-              </div>
-              <div class="action-row">
-                <a class="download-link" href="${escapeHtml(payload.txt_download_url)}" target="_blank" rel="noreferrer">
-                  下载共享 .txt
-                </a>
-                <a class="download-link alt" href="${escapeHtml(payload.epub_download_url)}" target="_blank" rel="noreferrer">
-                  下载共享 .epub
-                </a>
-              </div>
-            </div>
-          </article>
-        `;
-      }
-
-      function renderUploadResult(payload) {
-        uploadResults.innerHTML = `
-          <article class="card">
-            <div>
-              <h2>${escapeHtml(payload.title)}</h2>
-              <p>${payload.title_tc ? `原始标题：${escapeHtml(payload.title_tc)}` : "原始标题：未识别"}</p>
-              <div class="pill-row">
-                <span class="pill">作者：${escapeHtml(payload.author || "未知")}</span>
-                <span class="pill">原文件：${escapeHtml(payload.source_filename || "未知")}</span>
-                <span class="pill">简体文本：${escapeHtml(payload.content_bytes || 0)} 字节</span>
-              </div>
-              <div class="action-row">
-                <a class="download-link" href="${escapeHtml(payload.txt_download_url)}" target="_blank" rel="noreferrer">
-                  下载简体 .txt
-                </a>
-                <a class="download-link alt" href="${escapeHtml(payload.epub_download_url)}" target="_blank" rel="noreferrer">
-                  下载简体 .epub
-                </a>
-              </div>
-            </div>
-          </article>
-        `;
-      }
-
-      function escapeHtml(value) {
-        return String(value)
-          .replaceAll("&", "&amp;")
-          .replaceAll("<", "&lt;")
-          .replaceAll(">", "&gt;")
-          .replaceAll('"', "&quot;")
-          .replaceAll("'", "&#39;");
-      }
-
       async function refreshStatus() {
         try {
           const response = await fetch(`${BACKEND_URL}/status`);
@@ -671,7 +641,7 @@
           );
           if (data.source_site_blocked) {
             setFeedback(
-              "源站当前使用 Cloudflare 阻止自动抓取。请改用上面的共享入库或 Tampermonkey 浏览器导入脚本。",
+              "源站当前使用 Cloudflare 阻止自动抓取。Storybin 会在搜索时自动尝试备用网址；如果你手里已有 TXT，也可以直接上传转换。",
               "error"
             );
           }
@@ -691,8 +661,9 @@
           renderFeatured(payload.results || []);
           setStatus(payload.index_status, payload.indexed_count, null);
         } catch (error) {
-          featuredResults.innerHTML =
-            '<div class="empty-state">暂时无法加载首页主推。请确认后端正在运行并且索引任务已启动。</div>';
+          featuredResults.innerHTML = renderEmptyState(
+            "暂时无法加载首页主推。请确认后端正在运行并且索引任务已启动。"
+          );
         }
       }
 
@@ -700,7 +671,7 @@
         const query = searchInput.value.trim();
         if (!query) {
           setFeedback("输入书名后开始搜索。");
-          results.innerHTML = "";
+          results.innerHTML = renderEmptyState("先查询一个书名；如果原站不可达，Storybin 会自动尝试备用网址。");
           return;
         }
 
@@ -721,21 +692,27 @@
           setStatus(payload.index_status, payload.indexed_count, null);
 
           if (!payload.results.length) {
-            renderResults([]);
+            renderResults([], payload.manual_source_links || []);
             setFeedback(
               payload.index_status === "building"
                 ? "索引仍在建立中，结果会随着后台抓取逐步出现。"
-                : "没有匹配结果。试试更短的关键词，或者用上面的共享入库把原站 TXT 导进来。"
+                : "没有匹配结果。Storybin 已尝试本地索引和备用网址；你也可以上传自己的 TXT 直接转换。"
             );
             return;
           }
 
           renderResults(payload.results);
-          setFeedback(`找到 ${payload.results.length} 条结果。`);
+          const externalCount = payload.results.filter((item) => item.result_kind === "external").length;
+          setFeedback(
+            externalCount
+              ? `找到 ${payload.results.length} 条结果，其中 ${externalCount} 条来自备用网址。`
+              : `找到 ${payload.results.length} 条结果。`
+          );
         } catch (error) {
           setFeedback(`后端不可用或请求失败：${error.message}`, "error");
-          results.innerHTML =
-            '<div class="empty-state">当前无法连接后端。请确认 `uvicorn` 正运行在 http://localhost:8000。</div>';
+          results.innerHTML = renderEmptyState(
+            "当前无法连接后端。请确认 `uvicorn` 正运行在 http://localhost:8000。"
+          );
         } finally {
           searchButton.disabled = false;
         }
@@ -744,7 +721,7 @@
       async function runUpload() {
         const file = uploadInput.files && uploadInput.files[0];
         if (!file) {
-          setUploadFeedback("先选择一个繁体中文 TXT 文件。", "error");
+          setUploadFeedback("先选择一个 TXT 文件。", "error");
           return;
         }
 
@@ -775,54 +752,11 @@
           setUploadFeedback("转换完成，可以直接下载简体 TXT 或 EPUB。");
         } catch (error) {
           setUploadFeedback(`上传或转换失败：${error.message}`, "error");
-          uploadResults.innerHTML =
-            '<div class="empty-state">当前无法完成文件转换。请确认后端已更新，并且上传的是可解码的 TXT 文件。</div>';
+          uploadResults.innerHTML = renderEmptyState(
+            "当前无法完成文件转换。请确认后端已更新，并且上传的是可解码的 TXT 文件。"
+          );
         } finally {
           uploadButton.disabled = false;
-        }
-      }
-
-      async function runCacheImport() {
-        const file = cacheFileInput.files && cacheFileInput.files[0];
-        if (!file) {
-          setCacheFeedback("先选择一个准备入库的 TXT 文件。", "error");
-          return;
-        }
-
-        cacheButton.disabled = true;
-        setCacheFeedback("正在导入共享书架…");
-
-        try {
-          const response = await fetch(`${BACKEND_URL}/contribute/cache`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              source_filename: file.name || "storybin-import.txt",
-              content_txt: await file.text(),
-              novel_url: cacheUrlInput.value.trim() || null,
-            }),
-          });
-
-          let payload = {};
-          try {
-            payload = await response.json();
-          } catch (error) {
-            payload = {};
-          }
-
-          if (!response.ok) {
-            throw new Error(payload.detail || `共享导入失败：HTTP ${response.status}`);
-          }
-
-          renderCacheResult(payload);
-          setCacheFeedback("导入完成，这本书已经进入共享搜索库。");
-          await refreshStatus();
-        } catch (error) {
-          setCacheFeedback(`共享导入失败：${error.message}`, "error");
-          cacheResults.innerHTML =
-            '<div class="empty-state">当前无法把 TXT 导入共享缓存。请确认文件可读，或者稍后再试。</div>';
-        } finally {
-          cacheButton.disabled = false;
         }
       }
 
@@ -843,16 +777,17 @@
         window.clearTimeout(debounceId);
         runSearch();
       });
-      cacheButton.addEventListener("click", runCacheImport);
       uploadButton.addEventListener("click", runUpload);
 
-      results.innerHTML = '<div class="empty-state">先查询一个书名，结果会显示在这里。</div>';
-      cacheResults.innerHTML =
-        '<div class="empty-state">如果搜索不到，就把从原站导出的 TXT 导入这里。导入后，全站都能搜到并下载。</div>';
-      uploadResults.innerHTML =
-        '<div class="empty-state">上传你从原站导出的繁体 TXT，这里会生成可下载的简体 TXT 和 EPUB。</div>';
-      featuredResults.innerHTML =
-        '<div class="empty-state">正在读取首页主推小说，稍后会显示最近更新的前 10 本。</div>';
+      results.innerHTML = renderEmptyState(
+        "先查询一个书名；如果原站不可达，Storybin 会自动尝试备用网址。"
+      );
+      uploadResults.innerHTML = renderEmptyState(
+        "上传你自己的 TXT，这里会生成可下载的简体 TXT 和 EPUB。"
+      );
+      featuredResults.innerHTML = renderEmptyState(
+        "正在读取首页主推小说，稍后会显示最近更新的前 10 本。"
+      );
       setFeedback("正在连接本地后端…");
       refreshStatus();
     </script>

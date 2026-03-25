@@ -102,6 +102,27 @@ def fetch_booklist_page_result(
             session.close()
 
 
+def fetch_html(
+    url: str,
+    *,
+    session: requests.Session | None = None,
+    allow_fallback: bool | None = None,
+) -> str:
+    own_session = session is None
+    session = session or requests.Session()
+
+    try:
+        return _request_text(
+            url,
+            session=session,
+            apply_rate_limit=own_session,
+            allow_fallback=own_session if allow_fallback is None else allow_fallback,
+        )
+    finally:
+        if own_session:
+            session.close()
+
+
 def fetch_novel_detail(
     novel_url: str,
     *,

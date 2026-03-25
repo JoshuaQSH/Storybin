@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 import re
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 import uuid
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from app import config, crawler
+from app import backup_sources, config, crawler
 from app.converter import to_simplified
 from app.crawler import (
     BooklistPage,
@@ -76,6 +76,7 @@ class ContributedCachedNovel(BaseModel):
 class AppState:
     store: IndexStore = field(default_factory=lambda: IndexStore(config.DB_PATH, database_url=config.DATABASE_URL))
     crawler_module: Any = crawler
+    backup_sources_module: Any = backup_sources
     admin_token: str = config.ADMIN_TOKEN
     cache_storage_backend: str = config.CACHE_STORAGE_BACKEND
     object_storage: Any = field(default_factory=build_object_storage_from_config)
@@ -233,6 +234,7 @@ def _search_results(state: AppState, query: str, limit: int) -> list[dict[str, A
         novel = state.store.get_novel_by_id(match["novel_id"])
         if novel is None:
             continue
+        source = state.backup_sources_module.identify_source(novel["url"])
         results.append(
             {
                 "novel_id": novel["novel_id"],
@@ -244,6 +246,11 @@ def _search_results(state: AppState, query: str, limit: int) -> list[dict[str, A
                 "latest_update": novel["latest_update"],
                 "score": match["score"],
                 "match_type": match["match_type"],
+                "source": source,
+                "source_name": state.backup_sources_module.source_label(source) if source else "索引缓存",
+                "is_simplified_source": state.backup_sources_module.source_is_simplified(source),
+                "result_kind": "local",
+                "cache_available": state.store.get_cached_novel(novel["novel_id"]) is not None,
             }
         )
     state.store.touch_novels([result["novel_id"] for result in results])
@@ -251,18 +258,25 @@ def _search_results(state: AppState, query: str, limit: int) -> list[dict[str, A
 
 
 def _featured_results(state: AppState, limit: int) -> list[dict[str, Any]]:
-    return [
-        {
-            "novel_id": novel["novel_id"],
-            "title": novel["title_sc"],
-            "title_tc": novel["title_tc"],
-            "author": novel["author_sc"] or to_simplified(novel["author_tc"] or ""),
-            "category": novel["category_sc"] or to_simplified(novel["category_tc"] or ""),
-            "url": novel["url"],
-            "latest_update": novel["latest_update"],
-        }
-        for novel in state.store.get_recent_novels(limit)
-    ]
+    results = []
+    for novel in state.store.get_recent_novels(limit):
+        source = state.backup_sources_module.identify_source(novel["url"])
+        results.append(
+            {
+                "novel_id": novel["novel_id"],
+                "title": novel["title_sc"],
+                "title_tc": novel["title_tc"],
+                "author": novel["author_sc"] or to_simplified(novel["author_tc"] or ""),
+                "category": novel["category_sc"] or to_simplified(novel["category_tc"] or ""),
+                "url": novel["url"],
+                "latest_update": novel["latest_update"],
+                "source": source,
+                "source_name": state.backup_sources_module.source_label(source) if source else "索引缓存",
+                "is_simplified_source": state.backup_sources_module.source_is_simplified(source),
+                "cache_available": state.store.get_cached_novel(novel["novel_id"]) is not None,
+            }
+        )
+    return results
 
 
 def _refresh_search_documents_if_needed(state: AppState):
@@ -324,6 +338,10 @@ def _cache_object_key(novel_id: str, content_sha256: str) -> str:
     return f"{novel_id}/{content_sha256}.txt"
 
 
+def _identity_text(text: str) -> str:
+    return text
+
+
 def _novel_id_and_url_for_contribution(
     novel_url: str | None,
     *,
@@ -380,19 +398,193 @@ def _persist_cached_novel(state: AppState, novel_id: str, rendered: dict[str, An
     )
 
 
+def _best_backup_match(state: AppState, novel: dict[str, Any]) -> Any | None:
+    query = (novel.get("title_sc") or "").strip() or to_simplified(novel.get("title_tc") or "")
+    if not query:
+        return None
+
+    normalized_title = to_simplified(novel.get("title_tc") or novel.get("title_sc") or "")
+    normalized_author = to_simplified(novel.get("author_tc") or novel.get("author_sc") or "")
+    candidates = state.backup_sources_module.search_backup_sources(query, limit=5)
+    if not candidates:
+        return None
+
+    for candidate in candidates:
+        if to_simplified(candidate.title) == normalized_title and (
+            not normalized_author or to_simplified(candidate.author) == normalized_author
+        ):
+            return candidate
+    for candidate in candidates:
+        if to_simplified(candidate.title) == normalized_title:
+            return candidate
+    return candidates[0]
+
+
+def _cache_or_get_external_novel(
+    state: AppState,
+    *,
+    source: str,
+    novel_id: str,
+    target_novel_id: str | None = None,
+    existing_novel: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    cache_id = target_novel_id or novel_id
+    cached = state.store.get_cached_novel(cache_id)
+    if cached is not None:
+        state.store.touch_cached_novel(cache_id)
+        return cached, True
+
+    detail = state.backup_sources_module.fetch_backup_novel(source, novel_id)
+    if existing_novel is None and state.store.get_novel_by_id(cache_id) is None:
+        state.store.upsert_novels(
+            [
+                NovelMeta(
+                    novel_id=cache_id,
+                    title=detail.title,
+                    author=detail.author,
+                    category=detail.category,
+                    url=detail.url,
+                    latest_update=detail.latest_update,
+                )
+            ]
+        )
+        state.refresh_search_documents()
+
+    rendered = render_novel(
+        detail,
+        lambda chapter_url: state.backup_sources_module.fetch_backup_chapter(source, chapter_url),
+        text_transform=_identity_text if detail.is_simplified else to_simplified,
+    )
+    if existing_novel is not None and existing_novel.get("title_sc"):
+        rendered["title_sc"] = existing_novel["title_sc"]
+    _persist_cached_novel(state, cache_id, rendered)
+    cached = state.store.get_cached_novel(cache_id)
+    if cached is None:  # pragma: no cover - defensive guard
+        raise RuntimeError(f"Failed to cache external novel {cache_id}")
+    return cached, False
+
+
 def _cache_or_get_novel(state: AppState, novel: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     cached = state.store.get_cached_novel(novel["novel_id"])
     if cached is not None:
         state.store.touch_cached_novel(novel["novel_id"])
         return cached, True
 
-    detail = state.crawler_module.fetch_novel_detail(novel["url"])
-    rendered = render_novel(detail, state.crawler_module.fetch_chapter)
-    _persist_cached_novel(state, novel["novel_id"], rendered)
+    try:
+        detail = state.crawler_module.fetch_novel_detail(novel["url"])
+        rendered = render_novel(detail, state.crawler_module.fetch_chapter)
+        _persist_cached_novel(state, novel["novel_id"], rendered)
+    except (SourceSiteBlockedError, CrawlerHTTPError) as exc:
+        source = state.backup_sources_module.identify_source(novel["url"])
+        should_try_backup = source == "xbanxia" and (
+            isinstance(exc, SourceSiteBlockedError) or state.source_site_blocked
+        )
+        if not should_try_backup:
+            raise
+
+        backup_match = _best_backup_match(state, novel)
+        if backup_match is None:
+            raise
+        return _cache_or_get_external_novel(
+            state,
+            source=backup_match.source,
+            novel_id=backup_match.novel_id,
+            target_novel_id=novel["novel_id"],
+            existing_novel=novel,
+        )
+
     cached = state.store.get_cached_novel(novel["novel_id"])
     if cached is None:  # pragma: no cover - defensive guard
         raise RuntimeError(f"Failed to cache novel {novel['novel_id']}")
     return cached, False
+
+
+def _external_search_results(state: AppState, query: str, limit: int) -> list[dict[str, Any]]:
+    results = []
+    for index, item in enumerate(state.backup_sources_module.search_backup_sources(query, limit=limit), start=1):
+        results.append(
+            {
+                "novel_id": item.novel_id,
+                "title": to_simplified(item.title),
+                "title_tc": item.title,
+                "author": to_simplified(item.author),
+                "category": to_simplified(item.category),
+                "url": item.url,
+                "latest_update": item.latest_update,
+                "score": max(70, 135 - index),
+                "match_type": "online-fallback",
+                "source": item.source,
+                "source_name": item.source_name,
+                "is_simplified_source": item.is_simplified,
+                "result_kind": "external",
+                "cache_available": state.store.get_cached_novel(item.novel_id) is not None,
+            }
+        )
+    return results
+
+
+def _merge_search_results(
+    local_results: list[dict[str, Any]],
+    external_results: list[dict[str, Any]],
+    *,
+    limit: int,
+    source_site_blocked: bool,
+) -> list[dict[str, Any]]:
+    def priority(item: dict[str, Any]) -> int:
+        if item.get("cache_available"):
+            return 0
+        if item.get("result_kind") == "external":
+            return 1
+        if source_site_blocked and item.get("source") == "xbanxia":
+            return 2
+        return 1
+
+    combined = [*local_results, *external_results]
+    combined.sort(key=lambda item: (priority(item), -item.get("score", 0), item["title"], item["novel_id"]))
+
+    merged: list[dict[str, Any]] = []
+    seen_novel_ids: set[str] = set()
+    for item in combined:
+        if item["novel_id"] in seen_novel_ids:
+            continue
+        seen_novel_ids.add(item["novel_id"])
+        merged.append(item)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
+def _manual_source_link_payloads(state: AppState, query: str) -> list[dict[str, str]]:
+    return [{"label": link.label, "url": link.url} for link in state.backup_sources_module.manual_source_links(query)]
+
+
+def _result_download_urls(request: Request, item: dict[str, Any]) -> tuple[str, str]:
+    if item.get("result_kind") == "external":
+        txt_url = str(request.url_for("download_external_novel")) + "?" + urlencode(
+            {"source": item["source"], "novel_id": item["novel_id"]}
+        )
+        epub_url = str(request.url_for("download_external_novel_epub")) + "?" + urlencode(
+            {"source": item["source"], "novel_id": item["novel_id"]}
+        )
+        return txt_url, epub_url
+
+    txt_url = str(request.url_for("download_novel")) + "?" + urlencode({"novel_id": item["novel_id"]})
+    epub_url = str(request.url_for("download_novel_epub")) + "?" + urlencode({"novel_id": item["novel_id"]})
+    return txt_url, epub_url
+
+
+def _attach_result_downloads(request: Request, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    attached = []
+    for item in items:
+        txt_url, epub_url = _result_download_urls(request, item)
+        attached.append(
+            {
+                **item,
+                "txt_download_url": txt_url,
+                "epub_download_url": epub_url,
+            }
+        )
+    return attached
 
 
 def create_app(state: AppState | None = None) -> FastAPI:
@@ -452,6 +644,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
 
     @app.get("/featured")
     async def featured_novels(
+        request: Request,
         limit: int = Query(default=config.FEATURED_LIMIT, ge=1, le=20),
         state: AppState = Depends(get_state),
     ):
@@ -459,13 +652,14 @@ def create_app(state: AppState | None = None) -> FastAPI:
         if not state.index_complete:
             ensure_index_build(state)
         return {
-            "results": _featured_results(state, limit),
+            "results": _attach_result_downloads(request, _featured_results(state, limit)),
             "index_status": state.index_status,
             "indexed_count": state.count,
         }
 
     @app.get("/search")
     async def search_novels(
+        request: Request,
         q: str = Query(default=""),
         limit: int = Query(default=20, ge=1, le=50),
         state: AppState = Depends(get_state),
@@ -473,10 +667,23 @@ def create_app(state: AppState | None = None) -> FastAPI:
         _refresh_search_documents_if_needed(state)
         if not state.index_complete:
             ensure_index_build(state)
+        local_results = _search_results(state, q, limit) if q.strip() else []
+        external_results: list[dict[str, Any]] = []
+        if q.strip() and (state.source_site_blocked or len(local_results) < limit):
+            external_results = await asyncio.to_thread(_external_search_results, state, q, limit)
         return {
-            "results": _search_results(state, q, limit) if q.strip() else [],
+            "results": _attach_result_downloads(
+                request,
+                _merge_search_results(
+                    local_results,
+                    external_results,
+                    limit=limit,
+                    source_site_blocked=state.source_site_blocked,
+                ),
+            ),
             "index_status": state.index_status,
             "indexed_count": state.count,
+            "manual_source_links": _manual_source_link_payloads(state, q) if q.strip() else [],
         }
 
     @app.get("/download")
@@ -527,6 +734,63 @@ def create_app(state: AppState | None = None) -> FastAPI:
                 content_txt,
             )
         except (CrawlerHTTPError, CrawlerParseError, ObjectStorageError, RuntimeError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return Response(
+            content=epub_bytes,
+            media_type="application/epub+zip",
+            headers=_epub_headers(cached["title_sc"]),
+        )
+
+    @app.get("/download/external", name="download_external_novel")
+    async def download_external_novel(
+        source: str = Query(...),
+        novel_id: str = Query(...),
+        state: AppState = Depends(get_state),
+    ):
+        try:
+            cached, cache_hit = _cache_or_get_external_novel(state, source=source, novel_id=novel_id)
+            stream = _stream_cached_novel(state, cached)
+        except (
+            backup_sources.BackupSourceError,
+            CrawlerHTTPError,
+            CrawlerParseError,
+            ObjectStorageError,
+            RuntimeError,
+        ) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return StreamingResponse(
+            stream,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                **_download_headers(cached["title_sc"]),
+                "X-Storybin-Download-Cache": "hit" if cache_hit else "miss",
+            },
+        )
+
+    @app.get("/download/external/epub", name="download_external_novel_epub")
+    async def download_external_novel_epub(
+        source: str = Query(...),
+        novel_id: str = Query(...),
+        state: AppState = Depends(get_state),
+    ):
+        try:
+            cached, _cache_hit = _cache_or_get_external_novel(state, source=source, novel_id=novel_id)
+            novel = state.store.get_novel_by_id(novel_id)
+            content_txt = _read_cached_novel_text(state, cached)
+            epub_bytes = build_epub(
+                cached["title_sc"],
+                (novel or {}).get("author_sc") or to_simplified((novel or {}).get("author_tc") or "") or "未知",
+                content_txt,
+            )
+        except (
+            backup_sources.BackupSourceError,
+            CrawlerHTTPError,
+            CrawlerParseError,
+            ObjectStorageError,
+            RuntimeError,
+        ) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         return Response(
