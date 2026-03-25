@@ -2,7 +2,13 @@ import hashlib
 
 import pytest
 
-from app.uploads import UploadedTextDecodeError, convert_uploaded_txt, decode_uploaded_text, extract_title_author
+from app.uploads import (
+    UploadedTextDecodeError,
+    convert_uploaded_text,
+    convert_uploaded_txt,
+    decode_uploaded_text,
+    extract_title_author,
+)
 
 
 def test_decode_uploaded_text_accepts_utf8_sig():
@@ -33,6 +39,17 @@ def test_convert_uploaded_txt_returns_simplified_text_and_metadata():
     assert "欢迎来到台湾。" in converted.content_txt
     assert converted.content_txt.endswith("\n")
     assert converted.content_sha256 == hashlib.sha256(converted.content_txt.encode("utf-8")).hexdigest()
+
+
+def test_convert_uploaded_text_accepts_already_decoded_text():
+    converted = convert_uploaded_text(
+        "taiwan-love.txt",
+        "《臺灣戀曲》\n作者：作者甲\n\n第1章 初見\n\n歡迎來到臺灣。",
+    )
+
+    assert converted.title_sc == "台湾恋曲"
+    assert converted.author_sc == "作者甲"
+    assert "欢迎来到台湾。" in converted.content_txt
 
 
 def test_convert_uploaded_txt_rejects_empty_input():

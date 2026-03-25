@@ -32,6 +32,10 @@ class ConvertedUpload:
 
 def convert_uploaded_txt(source_filename: str, raw_bytes: bytes) -> ConvertedUpload:
     text_tc = decode_uploaded_text(raw_bytes)
+    return convert_uploaded_text(source_filename, text_tc)
+
+
+def convert_uploaded_text(source_filename: str, text_tc: str) -> ConvertedUpload:
     text_sc = to_simplified(text_tc).strip()
     if not text_sc:
         raise UploadedTextDecodeError("Uploaded TXT is empty after decoding.")

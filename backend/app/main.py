@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import hashlib
 import logging
 from pathlib import Path
+import re
 from typing import Any
 from urllib.parse import quote
 import uuid
@@ -31,7 +32,7 @@ from app.index_store import IndexStore
 from app.rendering import render_novel
 from app.search import SearchDocument, fuzzy_search
 from app.storage import ObjectStorageError, build_object_storage_from_config
-from app.uploads import UploadedTextDecodeError, convert_uploaded_txt
+from app.uploads import UploadedTextDecodeError, convert_uploaded_text, convert_uploaded_txt
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,17 @@ class ImportedExternalCachedNovel(BaseModel):
     content_sha256: str
     chapter_count: int
     latest_update: str | None = None
+
+
+class ContributedCachedNovel(BaseModel):
+    source_filename: str = "storybin-import.txt"
+    content_txt: str
+    novel_url: str | None = None
+    title: str | None = None
+    author: str | None = None
+    category: str | None = None
+    latest_update: str | None = None
+    chapter_count: int | None = None
 
 
 @dataclass
@@ -281,6 +293,10 @@ def _epub_headers(title: str) -> dict[str, str]:
     return _attachment_headers(f"{title}.epub", fallback_name="banxia.epub")
 
 
+SOURCE_NOVEL_ID_RE = re.compile(r"/books/(?P<novel_id>\d+)\.html$")
+CHAPTER_HEADING_RE = re.compile(r"^第\d+章\b", re.MULTILINE)
+
+
 def _stream_text(text: str) -> Any:
     def iterator():
         yield text
@@ -296,8 +312,36 @@ def _stream_cached_novel(state: AppState, cached: dict[str, Any]) -> Any:
     return _stream_text(cached["content_txt"])
 
 
+def _read_cached_novel_text(state: AppState, cached: dict[str, Any]) -> str:
+    if cached["storage_backend"] == "r2":
+        if state.object_storage is None or not cached["object_key"]:
+            raise RuntimeError("R2 cache is enabled but the object storage client is unavailable.")
+        return "".join(state.object_storage.iter_text(cached["object_key"]))
+    return cached["content_txt"]
+
+
 def _cache_object_key(novel_id: str, content_sha256: str) -> str:
     return f"{novel_id}/{content_sha256}.txt"
+
+
+def _novel_id_and_url_for_contribution(
+    novel_url: str | None,
+    *,
+    content_sha256: str,
+) -> tuple[str, str]:
+    normalized_url = (novel_url or "").strip()
+    if normalized_url:
+        match = SOURCE_NOVEL_ID_RE.search(normalized_url)
+        if match:
+            return match.group("novel_id"), normalized_url
+    novel_id = f"manual-{content_sha256[:16]}"
+    fallback_url = normalized_url or f"https://storybin.local/manual/{novel_id}"
+    return novel_id, fallback_url
+
+
+def _estimate_chapter_count(content_txt: str) -> int:
+    count = len(CHAPTER_HEADING_RE.findall(content_txt))
+    return count if count > 0 else 1
 
 
 def _persist_cached_novel(state: AppState, novel_id: str, rendered: dict[str, Any]):
@@ -461,6 +505,103 @@ def create_app(state: AppState | None = None) -> FastAPI:
                 "X-Storybin-Download-Cache": "hit" if cache_hit else "miss",
             },
         )
+
+    @app.get("/download/epub", name="download_novel_epub")
+    async def download_novel_epub(
+        novel_id: str = Query(...),
+        state: AppState = Depends(get_state),
+    ):
+        novel = state.store.get_novel_by_id(novel_id)
+        if novel is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Novel not found. Try searching first.",
+            )
+        state.store.touch_novels([novel_id])
+        try:
+            cached, _cache_hit = _cache_or_get_novel(state, novel)
+            content_txt = _read_cached_novel_text(state, cached)
+            epub_bytes = build_epub(
+                cached["title_sc"],
+                novel["author_sc"] or to_simplified(novel["author_tc"] or "") or "未知",
+                content_txt,
+            )
+        except (CrawlerHTTPError, CrawlerParseError, ObjectStorageError, RuntimeError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return Response(
+            content=epub_bytes,
+            media_type="application/epub+zip",
+            headers=_epub_headers(cached["title_sc"]),
+        )
+
+    @app.post("/contribute/cache")
+    async def contribute_cached_novel(
+        payload: ContributedCachedNovel,
+        request: Request,
+        state: AppState = Depends(get_state),
+    ):
+        if not payload.content_txt.strip():
+            raise HTTPException(status_code=400, detail="Imported TXT is empty.")
+
+        try:
+            converted = convert_uploaded_text(payload.source_filename, payload.content_txt)
+        except UploadedTextDecodeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        title_tc = (payload.title or "").strip() or converted.title_tc
+        author_tc = (payload.author or "").strip() or converted.author_tc or "未知"
+        category_tc = (payload.category or "").strip() or "用户导入"
+        title_sc = to_simplified(title_tc)
+        chapter_count = payload.chapter_count or _estimate_chapter_count(converted.content_txt)
+        novel_id, canonical_url = _novel_id_and_url_for_contribution(
+            payload.novel_url,
+            content_sha256=converted.content_sha256,
+        )
+
+        state.store.upsert_novels(
+            [
+                NovelMeta(
+                    novel_id=novel_id,
+                    title=title_tc,
+                    author=author_tc,
+                    category=category_tc,
+                    url=canonical_url,
+                    latest_update=payload.latest_update,
+                )
+            ]
+        )
+
+        try:
+            _persist_cached_novel(
+                state,
+                novel_id,
+                {
+                    "title_sc": title_sc,
+                    "content_txt": converted.content_txt,
+                    "chapter_count": chapter_count,
+                },
+            )
+        except (ObjectStorageError, RuntimeError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        state.refresh_search_documents()
+        txt_url = f"{request.url_for('download_novel')}?novel_id={quote(novel_id)}"
+        epub_url = f"{request.url_for('download_novel_epub')}?novel_id={quote(novel_id)}"
+        return {
+            "status": "imported",
+            "novel_id": novel_id,
+            "title": title_sc,
+            "title_tc": title_tc,
+            "author": to_simplified(author_tc),
+            "author_tc": author_tc,
+            "category": to_simplified(category_tc),
+            "category_tc": category_tc,
+            "chapter_count": chapter_count,
+            "cache_storage_backend": state.cache_storage_backend,
+            "txt_download_url": txt_url,
+            "epub_download_url": epub_url,
+        }
 
     @app.post("/convert/upload")
     async def upload_and_convert_txt(

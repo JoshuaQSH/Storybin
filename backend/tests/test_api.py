@@ -209,6 +209,24 @@ async def test_download_novel():
 
 
 @pytest.mark.asyncio
+async def test_download_novel_epub():
+    store = IndexStore(":memory:")
+    preload_store(store)
+    state = AppState(store=store, crawler_module=DummyCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        await client.get("/download", params={"novel_id": "409088"})
+        resp = await client.get("/download/epub", params={"novel_id": "409088"})
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/epub+zip"
+        assert "filename*=UTF-8''%E5%8F%B0%E6%B9%BE%E6%81%8B%E6%9B%B2.epub" in resp.headers["content-disposition"]
+        with ZipFile(BytesIO(resp.content)) as archive:
+            chapter = archive.read("OEBPS/text/chapter-001.xhtml").decode("utf-8")
+            assert "欢迎来到台湾。" in chapter
+
+
+@pytest.mark.asyncio
 async def test_download_unknown_novel_returns_404():
     state = AppState(store=IndexStore(":memory:"), crawler_module=DummyCrawler(), auto_start_index_build=False)
 
@@ -463,6 +481,45 @@ async def test_admin_import_cached_novel_makes_search_and_download_available():
         assert download_resp.status_code == 200
         assert download_resp.headers["x-storybin-download-cache"] == "hit"
         assert "欢迎来到台湾。" in download_resp.text
+
+
+@pytest.mark.asyncio
+async def test_contribute_cache_makes_search_and_download_available_without_crawler():
+    store = IndexStore(":memory:")
+    state = AppState(store=store, crawler_module=BlockedCrawler(), auto_start_index_build=False)
+
+    async with client_for_state(state) as client:
+        import_resp = await client.post(
+            "/contribute/cache",
+            json={
+                "source_filename": "taiwan-share.txt",
+                "novel_url": "https://www.xbanxia.cc/books/700001.html",
+                "content_txt": "《臺灣共享小說》\n作者：作者庚\n\n第1章 初見\n\n歡迎來到臺灣。\n",
+                "category": "測試分類",
+            },
+        )
+        assert import_resp.status_code == 200
+        payload = import_resp.json()
+        assert payload["status"] == "imported"
+        assert payload["novel_id"] == "700001"
+        assert payload["title"] == "台湾共享小说"
+        assert payload["txt_download_url"].endswith("/download?novel_id=700001")
+        assert payload["epub_download_url"].endswith("/download/epub?novel_id=700001")
+
+        search_resp = await client.get("/search", params={"q": "台湾共享小说"})
+        assert search_resp.status_code == 200
+        assert search_resp.json()["results"][0]["novel_id"] == "700001"
+
+        download_resp = await client.get("/download", params={"novel_id": "700001"})
+        assert download_resp.status_code == 200
+        assert download_resp.headers["x-storybin-download-cache"] == "hit"
+        assert "欢迎来到台湾。" in download_resp.text
+
+        epub_resp = await client.get("/download/epub", params={"novel_id": "700001"})
+        assert epub_resp.status_code == 200
+        with ZipFile(BytesIO(epub_resp.content)) as archive:
+            chapter = archive.read("OEBPS/text/chapter-001.xhtml").decode("utf-8")
+            assert "欢迎来到台湾。" in chapter
 
 
 @pytest.mark.asyncio

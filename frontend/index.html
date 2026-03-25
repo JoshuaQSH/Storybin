@@ -102,6 +102,7 @@
       }
 
       .search-input,
+      .text-input,
       .file-input,
       .search-button {
         border: 1px solid rgba(126, 84, 33, 0.18);
@@ -110,6 +111,7 @@
       }
 
       .search-input,
+      .text-input,
       .file-input {
         width: 100%;
         padding: 18px 20px;
@@ -118,7 +120,8 @@
         box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
       }
 
-      .search-input:focus {
+      .search-input:focus,
+      .text-input:focus {
         outline: 2px solid rgba(159, 74, 28, 0.2);
         border-color: rgba(159, 74, 28, 0.5);
       }
@@ -296,6 +299,15 @@
         background: linear-gradient(180deg, #9a7f3c, #76591f);
       }
 
+      .assist-link {
+        color: var(--accent-strong);
+        text-decoration: none;
+      }
+
+      .assist-link:hover {
+        text-decoration: underline;
+      }
+
       .action-row {
         display: flex;
         flex-wrap: wrap;
@@ -340,8 +352,8 @@
         <div class="eyebrow">Storybin</div>
         <h1>Storybin</h1>
         <p class="subtitle">
-          搜索已建立索引的小说，点击即可从本地后端生成并下载简体中文 `.txt`。
-          超长小说在 Render 免费层上可能因为 30 秒超时而中断，所以本地测试时优先验证中短篇。
+          先搜索已经缓存好的小说；如果没找到，就把你在原站浏览器里导出的全文导入共享书架。
+          导入后，所有访问者都可以直接下载简体中文 `.txt` 和 `.epub`。
         </p>
 
         <div class="controls">
@@ -367,9 +379,34 @@
       </section>
 
       <section class="shelf">
+        <h2 class="section-title">导入共享书架</h2>
+        <p class="section-copy">
+          不再做整站全量抓取，而是按需把原站小说导入共享缓存。你可以先在原站用 Tampermonkey 导出全文，
+          然后把 `.txt` 连同原书链接一起提交到 Storybin。导入成功后，这本书会立刻进入搜索结果。
+          <a class="assist-link" href="./storybin-import.user.js" target="_blank" rel="noreferrer">打开 Tampermonkey 导入脚本</a>
+        </p>
+        <div class="controls">
+          <input id="cacheFileInput" class="file-input" type="file" accept=".txt,text/plain" />
+          <button id="cacheButton" class="search-button" type="button">导入共享书架</button>
+        </div>
+        <div class="controls">
+          <input
+            id="cacheUrlInput"
+            class="text-input"
+            type="url"
+            placeholder="可选：粘贴原站小说链接，例如 https://www.xbanxia.cc/books/410113.html"
+          />
+          <div class="note-chip">共享缓存会生成全站可搜索的 TXT / EPUB</div>
+        </div>
+        <div id="cacheFeedback" class="feedback"></div>
+        <section id="cacheResults" class="results" aria-live="polite"></section>
+      </section>
+
+      <section class="shelf">
         <h2 class="section-title">上传自带 TXT</h2>
         <p class="section-copy">
-          如果你已经通过浏览器脚本从原站导出了繁体中文 `.txt`，可以直接上传到这里，转换成简体中文，并下载 `.txt` 或 `.epub`。
+          如果你只想自己临时转换文件、不进入共享搜索库，也可以在这里上传繁体中文 `.txt`，
+          立即下载简体中文 `.txt` 或 `.epub`。
         </p>
         <div class="controls">
           <input id="uploadInput" class="file-input" type="file" accept=".txt,text/plain" />
@@ -400,6 +437,11 @@
 
       const searchInput = document.getElementById("searchInput");
       const searchButton = document.getElementById("searchButton");
+      const cacheFileInput = document.getElementById("cacheFileInput");
+      const cacheButton = document.getElementById("cacheButton");
+      const cacheUrlInput = document.getElementById("cacheUrlInput");
+      const cacheFeedback = document.getElementById("cacheFeedback");
+      const cacheResults = document.getElementById("cacheResults");
       const uploadInput = document.getElementById("uploadInput");
       const uploadButton = document.getElementById("uploadButton");
       const uploadFeedback = document.getElementById("uploadFeedback");
@@ -424,6 +466,11 @@
       function setUploadFeedback(message, kind = "") {
         uploadFeedback.textContent = message;
         uploadFeedback.className = kind ? `feedback ${kind}` : "feedback";
+      }
+
+      function setCacheFeedback(message, kind = "") {
+        cacheFeedback.textContent = message;
+        cacheFeedback.className = kind ? `feedback ${kind}` : "feedback";
       }
 
       function setStatus(status, count, lastError, pagesCrawled = null, pagesTotal = null) {
@@ -482,14 +529,24 @@
                     <span class="pill">命中方式：${escapeHtml(item.match_type || "fuzzy")}</span>
                   </div>
                 </div>
-                <a
-                  class="download-link"
-                  href="${BACKEND_URL}/download?novel_id=${encodeURIComponent(item.novel_id)}"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  下载 .txt
-                </a>
+                <div class="action-row">
+                  <a
+                    class="download-link"
+                    href="${BACKEND_URL}/download?novel_id=${encodeURIComponent(item.novel_id)}"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    下载 .txt
+                  </a>
+                  <a
+                    class="download-link alt"
+                    href="${BACKEND_URL}/download/epub?novel_id=${encodeURIComponent(item.novel_id)}"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    下载 .epub
+                  </a>
+                </div>
               </article>
             `
           )
@@ -516,18 +573,53 @@
                     <span class="pill">最近更新：${escapeHtml(item.latest_update || "待补充")}</span>
                   </div>
                 </div>
-                <a
-                  class="download-link"
-                  href="${BACKEND_URL}/download?novel_id=${encodeURIComponent(item.novel_id)}"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  下载 .txt
-                </a>
+                <div class="action-row">
+                  <a
+                    class="download-link"
+                    href="${BACKEND_URL}/download?novel_id=${encodeURIComponent(item.novel_id)}"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    下载 .txt
+                  </a>
+                  <a
+                    class="download-link alt"
+                    href="${BACKEND_URL}/download/epub?novel_id=${encodeURIComponent(item.novel_id)}"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    下载 .epub
+                  </a>
+                </div>
               </article>
             `
           )
           .join("");
+      }
+
+      function renderCacheResult(payload) {
+        cacheResults.innerHTML = `
+          <article class="card">
+            <div>
+              <h2>${escapeHtml(payload.title)}</h2>
+              <p>${payload.title_tc ? `原始标题：${escapeHtml(payload.title_tc)}` : "原始标题：未识别"}</p>
+              <div class="pill-row">
+                <span class="pill">作者：${escapeHtml(payload.author || "未知")}</span>
+                <span class="pill">分类：${escapeHtml(payload.category || "用户导入")}</span>
+                <span class="pill">章节数：${escapeHtml(payload.chapter_count || 1)}</span>
+                <span class="pill">编号：${escapeHtml(payload.novel_id)}</span>
+              </div>
+              <div class="action-row">
+                <a class="download-link" href="${escapeHtml(payload.txt_download_url)}" target="_blank" rel="noreferrer">
+                  下载共享 .txt
+                </a>
+                <a class="download-link alt" href="${escapeHtml(payload.epub_download_url)}" target="_blank" rel="noreferrer">
+                  下载共享 .epub
+                </a>
+              </div>
+            </div>
+          </article>
+        `;
       }
 
       function renderUploadResult(payload) {
@@ -579,7 +671,7 @@
           );
           if (data.source_site_blocked) {
             setFeedback(
-              "源站当前使用 Cloudflare 阻止自动抓取。已保留本地缓存索引，但新的自动索引暂时不可用。",
+              "源站当前使用 Cloudflare 阻止自动抓取。请改用上面的共享入库或 Tampermonkey 浏览器导入脚本。",
               "error"
             );
           }
@@ -633,7 +725,7 @@
             setFeedback(
               payload.index_status === "building"
                 ? "索引仍在建立中，结果会随着后台抓取逐步出现。"
-                : "没有匹配结果。试试更短的关键词。"
+                : "没有匹配结果。试试更短的关键词，或者用上面的共享入库把原站 TXT 导进来。"
             );
             return;
           }
@@ -690,6 +782,50 @@
         }
       }
 
+      async function runCacheImport() {
+        const file = cacheFileInput.files && cacheFileInput.files[0];
+        if (!file) {
+          setCacheFeedback("先选择一个准备入库的 TXT 文件。", "error");
+          return;
+        }
+
+        cacheButton.disabled = true;
+        setCacheFeedback("正在导入共享书架…");
+
+        try {
+          const response = await fetch(`${BACKEND_URL}/contribute/cache`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              source_filename: file.name || "storybin-import.txt",
+              content_txt: await file.text(),
+              novel_url: cacheUrlInput.value.trim() || null,
+            }),
+          });
+
+          let payload = {};
+          try {
+            payload = await response.json();
+          } catch (error) {
+            payload = {};
+          }
+
+          if (!response.ok) {
+            throw new Error(payload.detail || `共享导入失败：HTTP ${response.status}`);
+          }
+
+          renderCacheResult(payload);
+          setCacheFeedback("导入完成，这本书已经进入共享搜索库。");
+          await refreshStatus();
+        } catch (error) {
+          setCacheFeedback(`共享导入失败：${error.message}`, "error");
+          cacheResults.innerHTML =
+            '<div class="empty-state">当前无法把 TXT 导入共享缓存。请确认文件可读，或者稍后再试。</div>';
+        } finally {
+          cacheButton.disabled = false;
+        }
+      }
+
       function queueSearch() {
         window.clearTimeout(debounceId);
         debounceId = window.setTimeout(runSearch, 300);
@@ -707,9 +843,12 @@
         window.clearTimeout(debounceId);
         runSearch();
       });
+      cacheButton.addEventListener("click", runCacheImport);
       uploadButton.addEventListener("click", runUpload);
 
       results.innerHTML = '<div class="empty-state">先查询一个书名，结果会显示在这里。</div>';
+      cacheResults.innerHTML =
+        '<div class="empty-state">如果搜索不到，就把从原站导出的 TXT 导入这里。导入后，全站都能搜到并下载。</div>';
       uploadResults.innerHTML =
         '<div class="empty-state">上传你从原站导出的繁体 TXT，这里会生成可下载的简体 TXT 和 EPUB。</div>';
       featuredResults.innerHTML =
