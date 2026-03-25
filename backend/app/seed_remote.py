@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 from pathlib import Path
+import shutil
 from typing import Any, Sequence
 
 import requests
@@ -392,6 +393,7 @@ def import_spooled_payloads(
     limit: int | None = None,
     upload_to_r2: bool = False,
     object_storage: NovelObjectStorage | None = None,
+    archive_imported_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     payload_paths = sorted(Path(spool_dir).expanduser().glob("*.json"))
     if limit is not None:
@@ -405,6 +407,7 @@ def import_spooled_payloads(
             workers=workers,
             upload_to_r2=upload_to_r2,
             object_storage=object_storage,
+            archive_imported_dir=archive_imported_dir,
         )
 
     if upload_to_r2 and object_storage is None:
@@ -431,6 +434,7 @@ def import_spooled_payloads(
                         payload=payload,
                         session=session,
                     )
+                archive_imported_payload(path, archive_imported_dir)
                 imported.append(response)
             except Exception as exc:
                 failures.append({"payload_path": str(path), "error": str(exc)})
@@ -445,6 +449,7 @@ def _import_spooled_payloads_parallel(
     workers: int,
     upload_to_r2: bool,
     object_storage: NovelObjectStorage | None,
+    archive_imported_dir: str | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     if upload_to_r2 and object_storage is None:
         object_storage = build_r2_storage_from_config()
@@ -461,6 +466,7 @@ def _import_spooled_payloads_parallel(
                 admin_token=admin_token,
                 upload_to_r2=upload_to_r2,
                 object_storage=object_storage,
+                archive_imported_dir=archive_imported_dir,
             ): index
             for index, path in enumerate(payload_paths)
         }
@@ -483,6 +489,7 @@ def _import_single_payload_path(
     admin_token: str,
     upload_to_r2: bool,
     object_storage: NovelObjectStorage | None,
+    archive_imported_dir: str | None,
 ) -> tuple[int, dict[str, Any] | None, dict[str, str] | None]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -501,9 +508,21 @@ def _import_single_payload_path(
                 admin_token=admin_token,
                 payload=payload,
             )
+        archive_imported_payload(path, archive_imported_dir)
         return index, response, None
     except Exception as exc:
         return index, None, {"payload_path": str(path), "error": str(exc)}
+
+
+def archive_imported_payload(path: Path, archive_imported_dir: str | None):
+    if not archive_imported_dir:
+        return
+    archive_dir = Path(archive_imported_dir).expanduser()
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    destination = archive_dir / path.name
+    if destination.resolve() == path.resolve():
+        return
+    shutil.move(str(path), str(destination))
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -526,6 +545,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--spool-only", action="store_true", help="Crawl and save payloads locally without importing.")
     parser.add_argument("--import-from-spool", help="Import previously saved JSON payloads from this directory.")
     parser.add_argument(
+        "--archive-imported-dir",
+        help="Optional directory to move successfully imported spool JSON payloads into.",
+    )
+    parser.add_argument(
         "--upload-to-r2",
         action="store_true",
         help="Upload novel TXT to R2 from the local machine, then register metadata with Render.",
@@ -544,6 +567,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             workers=max(1, args.workers),
             limit=args.limit,
             upload_to_r2=args.upload_to_r2,
+            archive_imported_dir=args.archive_imported_dir,
         )
         for result in imported:
             print(json.dumps(result, ensure_ascii=False))

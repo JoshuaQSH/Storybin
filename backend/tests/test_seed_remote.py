@@ -402,3 +402,29 @@ def test_import_spooled_payloads_can_upload_to_r2_before_register(monkeypatch, t
     assert failures == []
     assert imported == [{"status": "imported", "novel_id": "410113", "cache_storage_backend": "r2"}]
     assert object_storage.objects
+
+
+def test_import_spooled_payloads_can_archive_imported_files(monkeypatch, tmp_path):
+    (tmp_path / "410113.json").write_text(
+        '{"novel_id":"410113","title":"二十年夏","author":"吟稀","category":"耽美同人","url":"https://www.xbanxia.cc/books/410113.html","content_txt":"cached","chapter_count":1,"latest_update":"2026-03-24"}',
+        encoding="utf-8",
+    )
+    archive_dir = tmp_path / "imported"
+
+    def fake_import_cached_novel(*, backend_url: str, admin_token: str, payload: dict, session=None, timeout: float = 180.0):
+        del backend_url, admin_token, session, timeout
+        return {"status": "imported", "novel_id": payload["novel_id"], "cache_storage_backend": "r2"}
+
+    monkeypatch.setattr("app.seed_remote.import_cached_novel", fake_import_cached_novel)
+
+    imported, failures = import_spooled_payloads(
+        backend_url="https://storybin.onrender.com",
+        admin_token="secret",
+        spool_dir=str(tmp_path),
+        archive_imported_dir=str(archive_dir),
+    )
+
+    assert failures == []
+    assert imported == [{"status": "imported", "novel_id": "410113", "cache_storage_backend": "r2"}]
+    assert not (tmp_path / "410113.json").exists()
+    assert (archive_dir / "410113.json").exists()
