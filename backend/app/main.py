@@ -509,15 +509,18 @@ def create_app(state: AppState | None = None) -> FastAPI:
                 )
             ]
         )
-        _persist_cached_novel(
-            state,
-            payload.novel_id,
-            {
-                "title_sc": to_simplified(payload.title),
-                "content_txt": to_simplified(payload.content_txt),
-                "chapter_count": payload.chapter_count,
-            },
-        )
+        try:
+            _persist_cached_novel(
+                state,
+                payload.novel_id,
+                {
+                    "title_sc": to_simplified(payload.title),
+                    "content_txt": to_simplified(payload.content_txt),
+                    "chapter_count": payload.chapter_count,
+                },
+            )
+        except (ObjectStorageError, RuntimeError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         state.refresh_search_documents()
         cached = state.store.get_cached_novel(payload.novel_id)
         if cached is None:  # pragma: no cover - defensive guard
