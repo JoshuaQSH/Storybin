@@ -232,6 +232,10 @@ def _request_response(
             apparent_encoding = getattr(response, "apparent_encoding", None)
             if isinstance(apparent_encoding, str) and apparent_encoding:
                 response.encoding = apparent_encoding
+            if _looks_like_blocked_html(response.text or ""):
+                raise SourceSiteBlockedError(
+                    f"Source site blocked automated access for {url}"
+                )
             return response
         except (requests.exceptions.HTTPError, requests.exceptions.Timeout) as exc:
             last_error = exc

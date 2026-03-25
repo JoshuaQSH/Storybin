@@ -100,6 +100,25 @@ def test_fetch_booklist_cloudflare_403_raises_source_blocked():
         fetch_booklist_page(1, session=session)
 
 
+def test_fetch_booklist_cloudflare_200_falls_back_to_curl_cffi(monkeypatch):
+    html = (FIXTURES / "booklist_page1.html").read_text(encoding="utf-8")
+    blocked_response = make_mock_response("<title>Just a moment...</title>", status=200)
+
+    monkeypatch.setattr(crawler.config, "FETCH_BACKENDS", ("requests", "curl_cffi"))
+
+    def fake_curl_cffi(url: str, *, apply_rate_limit: bool):
+        del url, apply_rate_limit
+        return html
+
+    monkeypatch.setattr(requests.Session, "request", lambda self, *args, **kwargs: blocked_response)
+    monkeypatch.setattr(crawler, "_request_text_via_curl_cffi", fake_curl_cffi)
+
+    result = fetch_booklist_page(1)
+
+    assert len(result) == 2
+    assert result[0].title == "鱗鲛無月"
+
+
 def test_crawl_full_novel_assembles_text():
     novel_html = (FIXTURES / "novel_page.html").read_text(encoding="utf-8")
     chapter_html = (FIXTURES / "chapter_page.html").read_text(encoding="utf-8")
